@@ -1,0 +1,303 @@
+---
+title: Quickstart
+description: Get up and running with the Rust examples in minutes.
+---
+
+# Quickstart Guide
+
+Get started with any of the three Rust examples. Each example is self-contained and can be run independently.
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Rust Toolchain" icon="rust">
+    Install Rust 1.70+ with rustup
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    ```
+  </Card>
+  <Card title="Docker (Optional)" icon="docker">
+    Required only for ParadeDB example
+    ```bash
+    docker --version
+    ```
+  </Card>
+</CardGroup>
+
+## Choose Your Example
+
+<Tabs>
+  <Tab title="Chat Server">
+    ## Run the Async Chatroom Server
+
+    The chat example demonstrates Tokio-based async networking with multi-client support.
+
+    <Steps>
+      <Step title="Navigate to the chat directory">
+        ```bash
+        cd chat
+        ```
+      </Step>
+
+      <Step title="Start the server">
+        ```bash
+        cargo run --bin server
+        ```
+        
+        You should see:
+        ```
+        listening on port 8888
+        ```
+      </Step>
+
+      <Step title="Connect a client">
+        Open a new terminal and connect using netcat:
+        ```bash
+        nc localhost 8888
+        ```
+        
+        The server will send a login message:
+        ```
+        LOGIN:2294
+        ```
+      </Step>
+
+      <Step title="Send messages">
+        Type a message and press enter:
+        ```
+        Hello, world!
+        ```
+        
+        The server acknowledges:
+        ```
+        ACK:MESSAGE
+        Hello, world!
+        ```
+      </Step>
+    </Steps>
+
+    <Note>
+      Open multiple terminal windows to connect multiple clients. All clients will receive messages broadcast by any client.
+    </Note>
+
+    ### Try the Sync Implementation
+
+    The chat example also includes a single-threaded synchronous implementation:
+
+    ```bash
+    cargo run --bin sync-server
+    ```
+
+    <Tip>
+      Compare the async and sync implementations to understand the tradeoffs between different concurrency models.
+    </Tip>
+  </Tab>
+
+  <Tab title="Order Book">
+    ## Run the Order Matching Engine
+
+    The order book example demonstrates a high-performance matching engine with price-time priority.
+
+    <Steps>
+      <Step title="Navigate to the order_book directory">
+        ```bash
+        cd order_book
+        ```
+      </Step>
+
+      <Step title="Run the interactive engine">
+        ```bash
+        cargo run
+        ```
+        
+        You'll see:
+        ```
+        Enter buy and sell orders. Ex: 10.0050 100 buy
+        ```
+      </Step>
+
+      <Step title="Submit orders">
+        Enter orders in the format: `price quantity side`
+        
+        ```
+        10.0050 100 buy
+        Submitting order: Order { id: 1, price: 10.0050, quantity: 100, side: Buy }
+        
+        10.0050 50 sell
+        Submitting order: Order { id: 2, price: 10.0050, quantity: 50, side: Sell }
+        --- TRADES ---
+        TRADE: Trade { price: 10.0050, quantity: 50, party_order_id: 2, counterparty_order_id: 1 }
+        ```
+      </Step>
+    </Steps>
+
+    <Note>
+      When orders cross (bid price ≥ ask price), they automatically match and generate trade events. Partial fills are supported.
+    </Note>
+
+    ### Order Format
+
+    - **Price**: Decimal number (e.g., `10.0050`)
+    - **Quantity**: Integer (e.g., `100`)
+    - **Side**: Either `buy` or `sell`
+
+    <Warning>
+      Prices must be positive. The engine will panic on zero or negative prices.
+    </Warning>
+  </Tab>
+
+  <Tab title="ParadeDB">
+    ## Run the Full-Text Search Example
+
+    The ParadeDB example demonstrates PostgreSQL full-text search with BM25 ranking.
+
+    <Steps>
+      <Step title="Navigate to the paradedb directory">
+        ```bash
+        cd paradedb
+        ```
+      </Step>
+
+      <Step title="Start the ParadeDB container">
+        ```bash
+        docker-compose up -d
+        ```
+        
+        Wait a few seconds for PostgreSQL to start.
+      </Step>
+
+      <Step title="Initialize the database">
+        ```bash
+        cargo run -- update
+        ```
+        
+        This creates the schema and loads sample articles:
+        ```
+        Database Initialized!
+        ```
+      </Step>
+
+      <Step title="Search for articles">
+        ```bash
+        cargo run -- search rust async
+        ```
+        
+        You'll see matching articles with BM25-ranked results:
+        ```
+        Articles:
+        --- BREAKING ---
+        **Introduction to Async Rust**
+        
+        Learn how to write asynchronous code in Rust...
+        
+        Published at: 2024-01-15 10:00:00
+        ```
+      </Step>
+    </Steps>
+
+    <Tip>
+      The search uses ParadeDB's BM25 algorithm for relevance ranking. Try different queries to see how results change.
+    </Tip>
+
+    ### Stop the Database
+
+    When you're done:
+    ```bash
+    docker-compose down
+    ```
+  </Tab>
+</Tabs>
+
+## Running Tests
+
+All examples include comprehensive test suites:
+
+<CodeGroup>
+```bash Chat
+cd chat
+cargo test
+```
+
+```bash Order Book
+cd order_book
+cargo test
+```
+
+```bash ParadeDB
+cd paradedb
+cargo test
+```
+</CodeGroup>
+
+<Note>
+  The chat tests use async integration testing with `#[tokio::test]`. The order book tests demonstrate extensive unit testing patterns.
+</Note>
+
+## Building Release Binaries
+
+For production-ready optimized binaries:
+
+```bash
+cargo build --release
+```
+
+The compiled binaries will be in `target/release/`.
+
+<Tip>
+  The ParadeDB example includes additional LTO (Link-Time Optimization) configuration for even better performance.
+</Tip>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Port 8888 already in use (Chat)">
+    Another process is using port 8888. Either stop that process or modify the port in `chat/src/server.rs`:
+    
+    ```rust
+    let addr = "127.0.0.1:8888"; // Change to a different port
+    ```
+  </Accordion>
+
+  <Accordion title="Docker connection refused (ParadeDB)">
+    Ensure Docker is running and the container is healthy:
+    
+    ```bash
+    docker-compose ps
+    docker-compose logs
+    ```
+    
+    Wait a few seconds after `docker-compose up -d` for PostgreSQL to fully start.
+  </Accordion>
+
+  <Accordion title="Compilation errors">
+    Ensure you're using a recent Rust version:
+    
+    ```bash
+    rustc --version  # Should be 1.70 or later
+    rustup update
+    ```
+  </Accordion>
+
+  <Accordion title="Missing dependencies">
+    Clean and rebuild:
+    
+    ```bash
+    cargo clean
+    cargo build
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Explore Examples" icon="code" href="/examples/chat">
+    Deep dive into each example's architecture and implementation details
+  </Card>
+  <Card title="Learn Async Patterns" icon="bolt" href="/guides/async-programming">
+    Master Tokio and asynchronous programming in Rust
+  </Card>
+  <Card title="Review Architecture" icon="sitemap" href="/reference/architecture">
+    Understand the design decisions behind each example
+  </Card>
+</CardGroup>
