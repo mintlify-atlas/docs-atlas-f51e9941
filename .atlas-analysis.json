@@ -1,0 +1,59 @@
+{
+  "projectType": "general",
+  "projectName": "Rust Examples",
+  "projectDescription": "A collection of Rust example projects demonstrating async programming, data structures, and database integration patterns.",
+  "theme": "aspen",
+  "primaryColor": "#CE422B",
+  "lightColor": "#F74C00",
+  "darkColor": "#5C2E1F",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Getting Started",
+        "pages": [
+          "introduction",
+          "quickstart"
+        ]
+      },
+      {
+        "group": "Examples",
+        "pages": [
+          "examples/chat",
+          "examples/order-book",
+          "examples/paradedb"
+        ]
+      },
+      {
+        "group": "Guides",
+        "pages": [
+          "guides/async-programming",
+          "guides/testing",
+          "guides/error-handling"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "reference/architecture",
+          "reference/dependencies"
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Async chatroom server with tokio",
+    "Order matching engine with BTreeSet",
+    "Full-text search with ParadeDB",
+    "Comprehensive testing examples",
+    "Both sync and async implementations"
+  ],
+  "publicApiSurface": [
+    "chat::Chat - Chat room manager",
+    "chat::ClientConnection - Client handler",
+    "MatchingEngine - Order book engine",
+    "Order - Order representation",
+    "Trade - Trade execution",
+    "db::DbConnection - Database connection",
+    "fetcher::read_articles_from_disk - Article reader"
+  ]
+}
