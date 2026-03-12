@@ -1,0 +1,87 @@
+---
+title: Introduction
+description: Learn Rust through practical examples covering async programming, data structures, and database integration.
+---
+
+# Rust Examples
+
+A curated collection of Rust projects demonstrating real-world patterns and best practices. Each example is a standalone project showcasing different aspects of systems programming in Rust.
+
+## What's Inside
+
+<CardGroup cols={2}>
+  <Card title="Async Chat Server" icon="comments" href="/examples/chat">
+    Multi-client chatroom built with Tokio, featuring both async and sync implementations
+  </Card>
+  <Card title="Order Book Engine" icon="chart-line" href="/examples/order-book">
+    High-performance order matching engine using BTreeSet with price-time priority
+  </Card>
+  <Card title="ParadeDB Search" icon="magnifying-glass" href="/examples/paradedb">
+    Full-text search system demonstrating PostgreSQL integration and query patterns
+  </Card>
+  <Card title="Testing Patterns" icon="vial" href="/guides/testing">
+    Comprehensive examples of unit testing, integration testing, and async test patterns
+  </Card>
+</CardGroup>
+
+## Key Features
+
+- **Async Programming** - Production-ready examples using Tokio for concurrent operations
+- **Data Structures** - Efficient implementations with BTreeSet and custom ordering
+- **Database Integration** - Real-world PostgreSQL usage with proper error handling
+- **Testing** - Comprehensive test coverage showing Rust testing best practices
+- **Error Handling** - Idiomatic error propagation with `thiserror` and `Result` types
+
+## Quick Start
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/slandau3/rust-examples.git
+    cd rust-examples
+    ```
+  </Step>
+  
+  <Step title="Choose an example">
+    Navigate to any example directory:
+    ```bash
+    cd chat        # Async chatroom server
+    cd order_book  # Order matching engine
+    cd paradedb    # Full-text search
+    ```
+  </Step>
+  
+  <Step title="Run the example">
+    ```bash
+    cargo run
+    ```
+    
+    For examples with multiple binaries:
+    ```bash
+    cargo run --bin server
+    ```
+  </Step>
+</Steps>
+
+## Who This Is For
+
+These examples are designed for developers who:
+
+- Want to learn Rust through practical, real-world projects
+- Need reference implementations for common patterns
+- Are building async systems with Tokio
+- Want to understand how to structure larger Rust projects
+- Are looking for testing and error handling patterns
+
+## Architecture
+
+Each example is self-contained with its own `Cargo.toml` and can be run independently. The projects demonstrate:
+
+- **Modular design** - Clear separation of concerns with well-defined modules
+- **Production patterns** - Error handling, logging, and configuration
+- **Modern Rust** - Uses 2021 edition features and current best practices
+- **Real dependencies** - Shows integration with popular crates from the ecosystem
+
+<Card title="Explore the Architecture" icon="sitemap" href="/reference/architecture">
+  Learn about the design patterns and architectural decisions behind each example
+</Card>

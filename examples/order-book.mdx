@@ -1,0 +1,570 @@
+---
+title: 'Order Matching Engine'
+description: 'High-performance order matching engine with price-time priority using BTreeSet'
+---
+
+## Overview
+
+This example implements a simple yet efficient order matching engine for a trading system. The engine matches buy and sell orders using **price-time priority**, demonstrating fundamental concepts used in real-world trading platforms.
+
+### What You'll Learn
+
+- Order matching algorithms and priority rules
+- Using `BTreeSet` for efficient order book management
+- Partial order fills and trade execution
+- Price-time priority implementation
+- Testing trading logic with comprehensive test cases
+
+## Engine Architecture
+
+The matching engine uses a **dual BTreeSet** structure to maintain separate buy (bid) and sell (ask) order books:
+
+```rust
+struct MatchingEngine {
+    bid: BTreeSet<Order>,
+    ask: BTreeSet<Order>,
+}
+```
+
+### Why BTreeSet?
+
+The `BTreeSet` data structure was chosen for its balance of simplicity and performance:
+
+<CardGroup cols={2}>
+  <Card title="O(log n) Operations" icon="gauge-high">
+    Both insertion and removal operations are O(log n), providing consistent performance as the order book grows.
+  </Card>
+  
+  <Card title="Automatic Sorting" icon="arrow-down-1-9">
+    Orders are automatically maintained in sorted order, making it easy to find the best bid/ask prices.
+  </Card>
+  
+  <Card title="Simple Implementation" icon="code">
+    Rust's standard library provides a robust BTreeSet implementation with no external dependencies.
+  </Card>
+  
+  <Card title="Memory Efficient" icon="memory">
+    Balanced tree structure provides good memory locality compared to linked lists.
+  </Card>
+</CardGroup>
+
+### Performance Characteristics
+
+**Per Order Submission:**
+- Insert order into BTreeSet: **O(log n)**
+- Pop order from BTreeSet: **O(log n)**
+- Matching process: **O(m log n)** where m is number of matches
+
+<Accordion title="Alternative Implementations">
+  **Vector-Based (Nasdaq-style):**
+  - Uses a vector for all possible price levels
+  - O(1) access to any price level
+  - More complex to implement
+  - Better performance for high-frequency trading
+  
+  **Doubly Linked List:**
+  - Maintains pointers to current best price
+  - Extremely performant for insertions at current price
+  - More complex implementation
+  - Better for market makers posting at best bid/ask
+  
+  This BTreeSet approach prioritizes **simplicity** and is suitable for most trading scenarios that don't require microsecond latency.
+</Accordion>
+
+## Order Structure
+
+Orders are represented with price, quantity, side, and a unique identifier:
+
+```rust
+type Price = Decimal;
+type Quantity = u64;
+type OrderIdentifier = u64;
+
+static NEXT_ORDER_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, PartialEq, Eq)]
+struct Order {
+    id: OrderIdentifier,
+    price: Price,
+    quantity: Quantity,
+    side: Side,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Side {
+    Buy,
+    Sell,
+}
+```
+
+### Order Creation
+
+```rust
+fn new(price: Price, quantity: Quantity, side: Side) -> Self {
+    assert!(price > Decimal::ZERO, "Price must be positive");
+    Self {
+        id: NEXT_ORDER_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        price,
+        quantity,
+        side,
+    }
+}
+```
+
+<Note>
+Order IDs are assigned atomically using `AtomicU64`, incrementing from 1. This ensures unique IDs even in multi-threaded environments and provides a natural time priority ordering.
+</Note>
+
+### Order Comparison
+
+Orders implement custom comparison logic to support price-time priority:
+
+```rust
+impl PartialOrd for Order {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        if self.price == other.price {
+            // Earlier id should be matched first (time priority)
+            self.id.partial_cmp(&other.id)
+        } else {
+            // Sort by price
+            self.price.partial_cmp(&other.price)
+        }
+    }
+}
+```
+
+**Priority Rules:**
+
+<Steps>
+  <Step title="Price Priority">
+    Orders are first sorted by price. Best bids (highest price) and best asks (lowest price) have priority.
+  </Step>
+  
+  <Step title="Time Priority">
+    When prices are equal, orders with lower IDs (submitted earlier) are matched first.
+  </Step>
+</Steps>
+
+## Order Matching Process
+
+When a new order is submitted, the engine attempts to match it with existing orders on the opposite side:
+
+```rust
+pub fn submit_order(&mut self, order: Order) -> Vec<Trade> {
+    match order.side {
+        Side::Buy => self.bid.insert(order),
+        Side::Sell => self.ask.insert(order),
+    };
+
+    self.match_orders()
+}
+```
+
+### Matching Algorithm
+
+<CodeGroup>
+```rust Main Logic
+fn match_orders(&mut self) -> Vec<Trade> {
+    let mut trades = Vec::new();
+
+    // Continue while both sides have orders
+    while !self.bid.is_empty() && !self.ask.is_empty() {
+        let bid_order = self.bid.last().unwrap();  // Highest bid
+        let ask_order = self.ask.first().unwrap(); // Lowest ask
+
+        if bid_order.price < ask_order.price {
+            // No crossing orders
+            break;
+        }
+
+        // Match found - pop both orders
+        let mut bid_order = self.bid.pop_last().unwrap();
+        let mut ask_order = self.ask.pop_first().unwrap();
+
+        let qty_matched = std::cmp::min(bid_order.quantity, ask_order.quantity);
+
+        // Determine trade price and party IDs
+        let (trade_price, party_order_id, counterparty_order_id) =
+            if bid_order.id > ask_order.id {
+                (ask_order.price, bid_order.id, ask_order.id)
+            } else {
+                (bid_order.price, ask_order.id, bid_order.id)
+            };
+
+        // Update quantities
+        bid_order.quantity -= qty_matched;
+        ask_order.quantity -= qty_matched;
+
+        // Reinsert partially filled orders
+        if bid_order.quantity > 0 {
+            self.bid.insert(bid_order);
+        } else if ask_order.quantity > 0 {
+            self.ask.insert(ask_order);
+        }
+
+        trades.push(Trade {
+            price: trade_price,
+            quantity: qty_matched,
+            party_order_id,
+            counterparty_order_id,
+        });
+    }
+
+    trades
+}
+```
+
+```rust Trade Structure
+#[derive(Debug)]
+struct Trade {
+    price: Price,
+    quantity: Quantity,
+    party_order_id: OrderIdentifier,
+    counterparty_order_id: OrderIdentifier,
+}
+```
+</CodeGroup>
+
+### Trade Price Determination
+
+The trade price follows the **liquidity taker pays maker's price** rule:
+
+<Tabs>
+  <Tab title="Bid Came Later">
+    If the buy order has a higher ID (came in later), it's the taker and trades at the ask price:
+    
+    ```rust
+    if bid_order.id > ask_order.id {
+        (ask_order.price, bid_order.id, ask_order.id)
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Ask Came Later">
+    If the sell order has a higher ID (came in later), it's the taker and trades at the bid price:
+    
+    ```rust
+    else {
+        (bid_order.price, ask_order.id, bid_order.id)
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+This pricing mechanism rewards liquidity providers (makers) who post resting orders by giving them a better price than the taker who crossed the spread.
+</Tip>
+
+## Running the Engine
+
+Start the matching engine and submit orders interactively:
+
+```bash
+cargo run
+```
+
+### Order Submission Format
+
+Orders follow the format: `<price> <quantity> <side>`
+
+```text
+Enter buy and sell orders. Ex: 10.0050 100 buy
+10.0050 100 buy
+Submitting order: Order { id: 1, price: 10.0050, quantity: 100, side: Buy }
+
+10.0050 100 sell
+Submitting order: Order { id: 2, price: 10.0050, quantity: 100, side: Sell }
+--- TRADES ---
+TRADE: Trade { price: 10.0050, quantity: 100, party_order_id: 2, counterparty_order_id: 1 }
+```
+
+## Example Scenarios
+
+### Scenario 1: Simple Match
+
+<Steps>
+  <Step title="Submit Buy Order">
+    ```text
+    10.0050 100 buy
+    ```
+    Order enters the bid book, no match.
+  </Step>
+  
+  <Step title="Submit Crossing Sell Order">
+    ```text
+    10.0050 100 sell
+    ```
+    Prices cross! Trade executes for 100 shares at 10.0050.
+  </Step>
+</Steps>
+
+**Result:**
+```text
+TRADE: Trade { price: 10.0050, quantity: 100, party_order_id: 2, counterparty_order_id: 1 }
+```
+
+### Scenario 2: Partial Fill
+
+<Steps>
+  <Step title="Large Buy Order">
+    ```text
+    10.00 100 buy
+    ```
+  </Step>
+  
+  <Step title="Smaller Sell Order">
+    ```text
+    10.00 30 sell
+    ```
+    Trade executes for 30 shares. Buy order remains with 70 shares.
+  </Step>
+  
+  <Step title="Another Sell Order">
+    ```text
+    10.00 50 sell
+    ```
+    Trade executes for 50 shares. Buy order remains with 20 shares.
+  </Step>
+</Steps>
+
+### Scenario 3: Multiple Price Levels
+
+<Steps>
+  <Step title="Setup Order Book">
+    ```text
+    10.00 50 buy
+    9.90 50 buy
+    ```
+    Two bids at different prices.
+  </Step>
+  
+  <Step title="Large Sell Order">
+    ```text
+    9.80 100 sell
+    ```
+    Sell order sweeps through multiple price levels.
+  </Step>
+</Steps>
+
+**Result:**
+```text
+--- TRADES ---
+TRADE: Trade { price: 10.00, quantity: 50, ... }
+TRADE: Trade { price: 9.90, quantity: 50, ... }
+```
+
+<Note>
+The sell order matches the best bid first (10.00), then moves to the next level (9.90), demonstrating **price priority**.
+</Note>
+
+## Testing
+
+The engine includes comprehensive test coverage:
+
+```bash
+cargo test
+```
+
+### Key Test Cases
+
+<AccordionGroup>
+  <Accordion title="No Match Scenario">
+    ```rust
+    #[test]
+    fn test_submit_order_no_match() {
+        reset_order_id();
+
+        let mut engine = MatchingEngine::new();
+        let order = Order::new("10.0050".parse().unwrap(), 100, Side::Buy);
+        let trades = engine.submit_order(order);
+        assert_eq!(trades.len(), 0);
+
+        // Submit ask order away from bid
+        let ask_order = Order::new("11.0050".parse().unwrap(), 100, Side::Sell);
+        let trades = engine.submit_order(ask_order);
+        assert_eq!(trades.len(), 0);
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Exact Match">
+    ```rust
+    #[test]
+    fn test_submit_order_with_match() {
+        reset_order_id();
+
+        let mut engine = MatchingEngine::new();
+        let bid_order = Order::new("10.0050".parse().unwrap(), 100, Side::Buy);
+        let ask_order = Order::new("09.0030".parse().unwrap(), 50, Side::Sell);
+
+        let trades = engine.submit_order(bid_order);
+        assert_eq!(trades.len(), 0);
+
+        let trades = engine.submit_order(ask_order);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].price, "10.0050".parse().unwrap());
+        assert_eq!(trades[0].quantity, 50);
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Partial Fill">
+    ```rust
+    #[test]
+    fn test_partial_fill() {
+        reset_order_id();
+
+        let mut engine = MatchingEngine::new();
+
+        let bid_order = Order::new("10.00".parse().unwrap(), 100, Side::Buy);
+        let trades = engine.submit_order(bid_order);
+        assert_eq!(trades.len(), 0);
+
+        let ask_order = Order::new("10.00".parse().unwrap(), 30, Side::Sell);
+        let trades = engine.submit_order(ask_order);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].quantity, 30);
+
+        // Remaining quantity should still be in the book
+        assert_eq!(engine.bid.len(), 1);
+        assert_eq!(engine.bid.last().unwrap().quantity, 70);
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Price-Time Priority">
+    ```rust
+    #[test]
+    fn test_price_time_priority() {
+        reset_order_id();
+
+        let mut engine = MatchingEngine::new();
+
+        // Create two asks at same price, different times
+        let ask1 = Order::new("10.00".parse().unwrap(), 50, Side::Sell);
+        let ask2 = Order::new("10.00".parse().unwrap(), 50, Side::Sell);
+        engine.submit_order(ask1);
+        engine.submit_order(ask2);
+
+        // Submit matching bid
+        let bid = Order::new("10.00".parse().unwrap(), 50, Side::Buy);
+        let trades = engine.submit_order(bid);
+
+        assert_eq!(trades.len(), 1);
+        // Earlier order (id: 1) should match first
+        assert_eq!(trades[0].counterparty_order_id, 1);
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Design Decisions
+
+### BTreeSet Choice
+
+The BTreeSet approach was selected to balance multiple concerns:
+
+<CardGroup cols={2}>
+  <Card title="Simplicity" icon="star">
+    Standard library implementation with no external dependencies or complex data structure management.
+  </Card>
+  
+  <Card title="Performance" icon="rocket">
+    O(log n) operations are acceptable for most trading scenarios and scale well to thousands of orders.
+  </Card>
+  
+  <Card title="Correctness" icon="check">
+    Well-tested standard library reduces bugs compared to custom implementations.
+  </Card>
+  
+  <Card title="Maintainability" icon="wrench">
+    Easy for other developers to understand and modify without specialized knowledge.
+  </Card>
+</CardGroup>
+
+### Price-Time Priority
+
+The engine implements standard **FIFO (First In, First Out)** matching:
+
+1. **Price Priority**: Best prices always match first
+   - Highest bids match before lower bids
+   - Lowest asks match before higher asks
+
+2. **Time Priority**: At the same price, earlier orders match first
+   - Order ID serves as timestamp proxy
+   - Simple and deterministic
+
+<Warning>
+In production systems, you'd use actual timestamps rather than sequential IDs to handle distributed order submission and clock synchronization.
+</Warning>
+
+### Atomic Order IDs
+
+```rust
+static NEXT_ORDER_ID: AtomicU64 = AtomicU64::new(1);
+```
+
+Using `AtomicU64` ensures thread-safe ID generation, making the engine ready for multi-threaded extensions:
+
+- **Thread-safe**: Multiple threads can submit orders concurrently
+- **Sequential**: IDs naturally represent submission order
+- **Efficient**: Lock-free atomic operations
+
+## Key Takeaways
+
+<CardGroup cols={2}>
+  <Card title="Data Structure Matters" icon="sitemap">
+    BTreeSet provides automatic sorting and O(log n) operations, simplifying the matching logic significantly.
+  </Card>
+  
+  <Card title="Price-Time Priority" icon="clock">
+    Standard FIFO matching ensures fairness and predictable execution for traders.
+  </Card>
+  
+  <Card title="Partial Fills" icon="chart-pie">
+    The engine handles partial order fills by reinserting unfilled portions back into the order book.
+  </Card>
+  
+  <Card title="Trade Pricing" icon="dollar-sign">
+    Takers cross the spread and pay the maker's price, rewarding liquidity provision.
+  </Card>
+</CardGroup>
+
+## Future Extensions
+
+<AccordionGroup>
+  <Accordion title="Performance Optimizations">
+    - Implement vector-based price level structure
+    - Use doubly linked lists with price level pointers
+    - Add order book depth caching
+    - Implement lock-free concurrent matching
+  </Accordion>
+  
+  <Accordion title="Advanced Features">
+    - Order types: Market, Limit, Stop, Stop-Limit
+    - Time-in-force: GTC, IOC, FOK, GTD
+    - Iceberg orders (display quantity)
+    - Order modification and cancellation
+    - Market maker protection mechanisms
+  </Accordion>
+  
+  <Accordion title="Trading Features">
+    - Multiple instruments/symbols
+    - Position tracking
+    - Risk management checks
+    - Trading halts and circuit breakers
+    - Auction mechanisms (opening/closing)
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Chat Example" icon="comments" href="/examples/chat">
+    Learn about building async multi-client servers with Tokio
+  </Card>
+  
+  <Card title="ParadeDB Example" icon="database" href="/examples/paradedb">
+    Explore full-text search with ParadeDB and PostgreSQL
+  </Card>
+</CardGroup>

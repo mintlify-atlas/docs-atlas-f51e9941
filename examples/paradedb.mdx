@@ -1,0 +1,668 @@
+---
+title: 'Full-Text Search with ParadeDB'
+description: 'Article search system using ParadeDB PostgreSQL extension for full-text search'
+---
+
+## Overview
+
+This example demonstrates building a full-text search system using ParadeDB, a PostgreSQL extension that provides high-performance search capabilities. The implementation shows practical database integration patterns and CLI design in Rust.
+
+### What You'll Learn
+
+- Full-text search with ParadeDB's BM25 algorithm
+- PostgreSQL integration using the `postgres` crate
+- Database schema design for search
+- CLI application structure with `clap`
+- Article data modeling and fetching
+
+## What is ParadeDB?
+
+ParadeDB is a PostgreSQL extension that adds advanced full-text search capabilities using the BM25 ranking algorithm. It provides:
+
+- **Fast full-text search** with relevance scoring
+- **PostgreSQL integration** - works with existing Postgres installations
+- **BM25 ranking** - industry-standard search algorithm
+- **Native SQL syntax** - query using familiar SQL operators
+
+<Note>
+This example uses basic ParadeDB functionality. In production, you'd add more sophisticated ranking, highlighting, faceting, and other search features.
+</Note>
+
+## Architecture
+
+The application follows a clean three-layer architecture:
+
+```text
+┌─────────────────────────────────────┐
+│          main.rs (CLI)              │
+│  Command parsing & orchestration    │
+└─────────────┬───────────────────────┘
+              │
+              ├─────────────────────┐
+              │                     │
+      ┌───────▼────────┐    ┌──────▼──────────┐
+      │   db.rs        │    │  fetcher.rs     │
+      │ Database ops   │    │  Data loading   │
+      └───────┬────────┘    └──────┬──────────┘
+              │                     │
+              ▼                     ▼
+        PostgreSQL            JSON files
+        (ParadeDB)
+```
+
+### Components
+
+<CardGroup cols={3}>
+  <Card title="main.rs" icon="terminal">
+    CLI interface using `clap` for command parsing and application orchestration.
+  </Card>
+  
+  <Card title="db.rs" icon="database">
+    Database connection, schema initialization, and search query execution.
+  </Card>
+  
+  <Card title="fetcher.rs" icon="file-code">
+    Article data structures and JSON file loading functionality.
+  </Card>
+</CardGroup>
+
+## Database Setup
+
+### Docker Compose Configuration
+
+The example includes a Docker setup for running ParadeDB:
+
+```yaml
+version: '3.8'
+
+services:
+  paradedb:
+    image: paradedb/paradedb:latest
+    container_name: paradedb
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres123
+      - POSTGRES_DB=parade
+    ports:
+      - "5433:5432"
+    volumes:
+      - paradedb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  paradedb_data:
+    driver: local
+```
+
+<Steps>
+  <Step title="Start ParadeDB">
+    ```bash
+    docker-compose up -d
+    ```
+    This starts PostgreSQL with the ParadeDB extension on port 5433.
+  </Step>
+  
+  <Step title="Verify Connection">
+    ```bash
+    docker logs paradedb
+    ```
+    Check that PostgreSQL started successfully and is accepting connections.
+  </Step>
+</Steps>
+
+### Database Connection
+
+The `DbConnection` struct manages the PostgreSQL connection:
+
+```rust
+use postgres::{Client, NoTls};
+
+pub struct DbConnection {
+    client: Client,
+}
+
+impl DbConnection {
+    pub fn new() -> Result<Self, postgres::Error> {
+        let client = Client::connect(
+            "host=localhost port=5433 user=postgres password=postgres123 dbname=parade",
+            NoTls,
+        )?;
+
+        Ok(Self { client })
+    }
+}
+```
+
+<Warning>
+This example uses plain text credentials for simplicity. In production:
+- Use environment variables for sensitive data
+- Implement proper connection pooling
+- Enable SSL/TLS for database connections
+- Use secrets management (e.g., Vault, AWS Secrets Manager)
+</Warning>
+
+## Schema Design
+
+The database schema is designed for full-text search:
+
+```rust
+pub fn init_database(&mut self) -> Result<(), postgres::Error> {
+    self.client.batch_execute(
+        "
+        CREATE TABLE IF NOT EXISTS articles (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            published_at TIMESTAMP WITH TIME ZONE NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS articles_search_idx 
+        ON articles 
+        USING bm25(id, title, content) 
+        WITH (key_field='id');
+        ",
+    )?;
+    Ok(())
+}
+```
+
+### Schema Components
+
+<Tabs>
+  <Tab title="Table Structure">
+    **articles table:**
+    
+    | Column | Type | Description |
+    |--------|------|-------------|
+    | `id` | UUID | Unique identifier (auto-generated) |
+    | `title` | TEXT | Article title (searchable) |
+    | `content` | TEXT | Article body (searchable) |
+    | `published_at` | TIMESTAMPTZ | Publication timestamp |
+  </Tab>
+  
+  <Tab title="BM25 Index">
+    **articles_search_idx:**
+    
+    ```sql
+    CREATE INDEX articles_search_idx 
+    ON articles 
+    USING bm25(id, title, content) 
+    WITH (key_field='id');
+    ```
+    
+    - **Index type**: `bm25` (ParadeDB's search index)
+    - **Indexed fields**: `title` and `content`
+    - **Key field**: `id` (used for scoring)
+    - **Algorithm**: BM25 ranking for relevance scoring
+  </Tab>
+</Tabs>
+
+<Tip>
+The BM25 index enables fast full-text search with relevance scoring. ParadeDB automatically maintains this index as you insert, update, or delete articles.
+</Tip>
+
+## Article Data Model
+
+Articles are represented with a clean, database-independent structure:
+
+```rust
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Article {
+    id: Uuid,
+    title: String,
+    content: String,
+    published_at: DateTime<Utc>,
+}
+
+impl Article {
+    pub fn new(id: Uuid, title: String, content: String, published_at: DateTime<Utc>) -> Self {
+        Self { id, title, content, published_at }
+    }
+
+    pub fn id(&self) -> Uuid { self.id }
+    pub fn title(&self) -> &str { &self.title }
+    pub fn content(&self) -> &str { &self.content }
+    pub fn published_at(&self) -> DateTime<Utc> { self.published_at }
+}
+```
+
+<Note>
+The Article struct is intentionally decoupled from the database, making it easy to:
+- Serialize/deserialize from JSON
+- Use with different storage backends
+- Test without database dependencies
+- Share between different parts of the application
+</Note>
+
+### Loading Articles from JSON
+
+```rust
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Articles {
+    articles: Vec<Article>,
+}
+
+impl IntoIterator for Articles {
+    type Item = Article;
+    type IntoIter = std::vec::IntoIter<Article>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.articles.into_iter()
+    }
+}
+
+pub fn read_articles_from_disk(path: &str) -> Result<Articles, std::io::Error> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let articles: Articles = serde_json::from_reader(reader)?;
+    Ok(articles)
+}
+```
+
+## CLI Interface
+
+The application uses `clap` for a clean command-line interface:
+
+```rust
+use clap::Parser;
+
+#[derive(Debug, clap::Parser)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// Update the database
+    Update,
+    /// Search for articles
+    Search {
+        /// The search query string
+        #[arg(trailing_var_arg = true)]
+        query: Vec<String>,
+    },
+}
+```
+
+### Commands
+
+<Tabs>
+  <Tab title="Update">
+    Load articles from JSON and populate the database:
+    
+    ```bash
+    cargo run -- update
+    ```
+    
+    This reads `data/sample_articles.json` and inserts all articles into the database.
+  </Tab>
+  
+  <Tab title="Search">
+    Search for articles matching a query:
+    
+    ```bash
+    cargo run -- search rust programming
+    ```
+    
+    The search query can contain multiple words which are joined together.
+  </Tab>
+</Tabs>
+
+## Inserting Articles
+
+Articles are inserted using parameterized queries:
+
+```rust
+pub fn insert_article(&mut self, article: &Article) -> Result<(), postgres::Error> {
+    self.client.execute(
+        "INSERT INTO articles (id, title, content, published_at) VALUES ($1, $2, $3, $4)",
+        &[
+            &article.id(),
+            &article.title(),
+            &article.content(),
+            &article.published_at(),
+        ],
+    )?;
+    Ok(())
+}
+```
+
+The update command reads articles from JSON and inserts them:
+
+```rust
+fn update_from_json(conn: &mut db::DbConnection) -> Result<(), SearchError> {
+    let articles = fetcher::read_articles_from_disk("data/sample_articles.json")?;
+
+    for article in articles {
+        conn.insert_article(&article)?;
+    }
+
+    Ok(())
+}
+```
+
+## Full-Text Search
+
+ParadeDB's search uses the `@@` operator with BM25 scoring:
+
+```rust
+pub fn search_articles(&mut self, query: &str) -> Result<Vec<Article>, postgres::Error> {
+    let rows = self.client.query(
+        "SELECT id, title, content, published_at, paradedb.score(id) 
+         FROM articles 
+         WHERE title @@ $1 OR content @@ $1 
+         ORDER BY score DESC",
+        &[&query],
+    )?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let id = row.get::<_, Uuid>("id");
+            let title = row.get::<_, String>("title");
+            let content = row.get::<_, String>("content");
+            let published_at = row.get::<_, DateTime<Utc>>("published_at");
+
+            Article::new(id, title, content, published_at)
+        })
+        .collect())
+}
+```
+
+### Search Query Breakdown
+
+<CodeGroup>
+```sql Query Structure
+SELECT 
+    id, 
+    title, 
+    content, 
+    published_at, 
+    paradedb.score(id)  -- BM25 relevance score
+FROM articles 
+WHERE 
+    title @@ $1         -- Match in title
+    OR 
+    content @@ $1       -- Match in content
+ORDER BY score DESC;    -- Best matches first
+```
+
+```rust Scoring
+// The @@ operator performs full-text search
+// ParadeDB's BM25 algorithm scores each match:
+// - Term frequency in document
+// - Inverse document frequency across corpus
+// - Document length normalization
+
+paradedb.score(id)  // Returns BM25 score for ordering
+```
+</CodeGroup>
+
+<Accordion title="How BM25 Scoring Works">
+  BM25 (Best Match 25) is a probabilistic search algorithm that ranks documents based on:
+  
+  1. **Term Frequency (TF)**: How often query terms appear in the document
+  2. **Inverse Document Frequency (IDF)**: How rare/common terms are across all documents
+  3. **Document Length**: Normalizes scores for longer vs shorter documents
+  
+  This produces more relevant results than simple keyword matching, prioritizing:
+  - Documents where query terms appear frequently
+  - Rare/specific terms over common words
+  - Shorter documents with good matches over long documents with scattered mentions
+</Accordion>
+
+## Running the Application
+
+### Setup and Initialization
+
+<Steps>
+  <Step title="Start ParadeDB">
+    ```bash
+    docker-compose up -d
+    ```
+    Wait for PostgreSQL to be ready (check with `docker logs paradedb`).
+  </Step>
+  
+  <Step title="Populate Database">
+    ```bash
+    cargo run -- update
+    ```
+    Output:
+    ```text
+    Database Initialized!
+    ```
+  </Step>
+  
+  <Step title="Search Articles">
+    ```bash
+    cargo run -- search rust
+    ```
+  </Step>
+</Steps>
+
+### Search Results Format
+
+```rust
+fn search_articles(conn: &mut db::DbConnection, query: &str) -> Result<(), postgres::Error> {
+    let articles = conn.search_articles(query)?;
+
+    for article in articles {
+        println!("--- BREAKING ---");
+        println!("**{}**", article.title());
+        println!();
+        println!("{}", article.content());
+        println!("\nPublished at: {}", article.published_at());
+        println!("\n\n\n");
+    }
+
+    Ok(())
+}
+```
+
+**Example Output:**
+
+```text
+Articles:
+--- BREAKING ---
+**Getting Started with Rust**
+
+Rust is a systems programming language that focuses on safety, 
+speed, and concurrency. It achieves memory safety without garbage 
+collection...
+
+Published at: 2024-01-15 10:30:00 UTC
+
+
+
+--- BREAKING ---
+**Advanced Rust Patterns**
+
+This article explores advanced patterns in Rust programming...
+
+Published at: 2024-02-20 14:15:00 UTC
+```
+
+## Error Handling
+
+The application uses custom error types with `thiserror`:
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum SearchError {
+    #[error(transparent)]
+    PostgresError(#[from] postgres::Error),
+    
+    #[error(transparent)]
+    ErrorReadingJsonError(#[from] std::io::Error),
+}
+```
+
+This provides clear error messages and proper error propagation:
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = args();
+    let mut conn = create_and_init_db()?;
+
+    match args.command {
+        Command::Update => {
+            update_from_json(&mut conn)?;
+            println!("Database Initialized!");
+        }
+        Command::Search { query } => {
+            println!("Articles:");
+            let query = query.join(" ");
+            search_articles(&mut conn, &query)?;
+        }
+    }
+
+    Ok(())
+}
+```
+
+## Design Patterns
+
+### Separation of Concerns
+
+<CardGroup cols={3}>
+  <Card title="Data Layer" icon="database">
+    `db.rs` handles all database operations with no business logic.
+  </Card>
+  
+  <Card title="Data Model" icon="cube">
+    `fetcher.rs` defines data structures independent of storage.
+  </Card>
+  
+  <Card title="Application Layer" icon="terminal">
+    `main.rs` orchestrates commands without database details.
+  </Card>
+</CardGroup>
+
+### Database Independence
+
+The Article struct is decoupled from database implementation:
+
+```rust
+// Article doesn't know about PostgreSQL
+pub struct Article {
+    id: Uuid,
+    title: String,
+    content: String,
+    published_at: DateTime<Utc>,
+}
+
+// Only DbConnection knows about database details
+impl DbConnection {
+    pub fn insert_article(&mut self, article: &Article) -> Result<(), postgres::Error> {
+        // Database-specific code lives here
+    }
+}
+```
+
+This design makes it easy to:
+- Switch database backends
+- Test with mock data
+- Serialize to different formats
+- Use in different contexts
+
+## Potential Enhancements
+
+<AccordionGroup>
+  <Accordion title="Advanced Search Features">
+    **Ranking Improvements:**
+    - Boost title matches over content matches
+    - Add custom weighting for different fields
+    - Implement phrase search
+    - Add fuzzy matching for typos
+    
+    **Search Refinement:**
+    - Faceted search (filter by date, category, etc.)
+    - Highlighting of matched terms
+    - Search suggestions/autocomplete
+    - Related articles recommendations
+  </Accordion>
+  
+  <Accordion title="Data Fetching">
+    **Real Data Sources:**
+    - RSS feed integration
+    - Web scraping pipeline
+    - API integrations (news APIs, blogs, etc.)
+    - Scheduled updates with cron jobs
+    
+    **Data Processing:**
+    - HTML parsing and cleaning
+    - Metadata extraction
+    - Image and media handling
+    - Content summarization
+  </Accordion>
+  
+  <Accordion title="User Interface">
+    **Web Frontend:**
+    - React/Next.js search interface
+    - Real-time search results
+    - Filters and sorting controls
+    - Article preview and reading view
+    
+    **API Layer:**
+    - RESTful API with Axum/Actix
+    - GraphQL interface
+    - Rate limiting and caching
+    - Authentication and user accounts
+  </Accordion>
+  
+  <Accordion title="Production Readiness">
+    **Infrastructure:**
+    - Connection pooling (r2d2, deadpool)
+    - Database migrations (diesel, sqlx)
+    - Monitoring and logging
+    - Backup and disaster recovery
+    
+    **Performance:**
+    - Query optimization
+    - Caching layer (Redis)
+    - Read replicas
+    - Horizontal scaling
+  </Accordion>
+</AccordionGroup>
+
+## Key Takeaways
+
+<CardGroup cols={2}>
+  <Card title="ParadeDB Integration" icon="magnifying-glass">
+    ParadeDB provides PostgreSQL-native full-text search with BM25 ranking using simple SQL operators.
+  </Card>
+  
+  <Card title="Clean Architecture" icon="layer-group">
+    Separating concerns (data model, database, CLI) makes the codebase maintainable and testable.
+  </Card>
+  
+  <Card title="Search Quality" icon="ranking-star">
+    BM25 scoring produces more relevant results than simple keyword matching by considering term frequency and rarity.
+  </Card>
+  
+  <Card title="CLI Design" icon="terminal">
+    Using `clap` provides a professional command-line interface with automatic help generation and type safety.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Chat Example" icon="comments" href="/examples/chat">
+    Learn about building async multi-client servers with Tokio
+  </Card>
+  
+  <Card title="Order Book Example" icon="book" href="/examples/order-book">
+    Explore implementing a high-performance order matching engine
+  </Card>
+</CardGroup>

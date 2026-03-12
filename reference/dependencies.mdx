@@ -1,0 +1,495 @@
+---
+title: 'Dependencies Reference'
+description: 'Comprehensive guide to all dependencies used across the Rust examples'
+---
+
+## Overview
+
+This page documents all dependencies used across the three example projects, explaining their purpose, usage, and why they were chosen.
+
+<CardGroup cols={3}>
+  <Card title="13 Total Dependencies" icon="cube">
+    Across all projects
+  </Card>
+  <Card title="3 Projects" icon="folder">
+    Chat, Order Book, ParadeDB
+  </Card>
+  <Card title="Rust 2021 Edition" icon="rust">
+    All projects
+  </Card>
+</CardGroup>
+
+---
+
+## By Category
+
+### Async Runtime
+
+<Accordion title="tokio - v1 (full features)">
+**Used in**: Chat Server
+
+**Purpose**: Provides the async runtime for concurrent client handling, including:
+- Async TCP networking (`tokio::net::TcpListener`, `TcpStream`)
+- Multi-producer, single-consumer channels (`tokio::sync::mpsc`)
+- Broadcast channels (`tokio::sync::broadcast`)
+- Async I/O traits (`AsyncReadExt`, `AsyncWriteExt`, `AsyncBufReadExt`)
+
+**Why chosen**: Industry-standard async runtime for Rust with excellent ergonomics and performance. The "full" feature flag enables all necessary components for network programming.
+
+**Key usage locations**:
+- Server initialization: `~/workspace/source/chat/src/server.rs:4-6`
+- Client connection handling: `~/workspace/source/chat/src/client.rs:1-4`
+- Main runtime: `#[tokio::main]` macro
+
+**Version**: 1.x (latest stable)
+
+```toml
+tokio = { version = "1", features = ["full"] }
+```
+</Accordion>
+
+<Accordion title="futures - * (latest)">
+**Used in**: Chat Server
+
+**Purpose**: Provides additional utilities for working with futures and streams, complementing Tokio's built-in functionality.
+
+**Why chosen**: Standard futures library that works seamlessly with Tokio for advanced async patterns.
+
+**Version**: Latest (unspecified in Cargo.toml)
+
+```toml
+futures = "*"
+```
+
+Reference: `~/workspace/source/chat/Cargo.toml:27`
+</Accordion>
+
+---
+
+### Database & Storage
+
+<Accordion title="postgres - v0.19">
+**Used in**: ParadeDB
+
+**Purpose**: Native PostgreSQL client for Rust, providing synchronous database access without requiring an async runtime.
+
+**Why chosen**: Simple, mature, and reliable PostgreSQL driver. Since ParadeDB is a CLI tool without concurrent requests, the synchronous API is simpler than async alternatives like `tokio-postgres`.
+
+**Key features used**:
+- Connection management: `Client::connect()`
+- Parameterized queries: `client.query()`
+- Batch execution: `client.batch_execute()`
+- NoTls connection (suitable for local development)
+
+**Usage locations**:
+- Connection: `~/workspace/source/paradedb/src/db.rs:14-16`
+- Search queries: `~/workspace/source/paradedb/src/db.rs:38-43`
+- Schema initialization: `~/workspace/source/paradedb/src/db.rs:62-74`
+
+**Version**: 0.19.x
+
+```toml
+postgres = "0.19"
+```
+</Accordion>
+
+<Accordion title="postgres-types - v0.2 (with-uuid-1, with-chrono-0_4)">
+**Used in**: ParadeDB
+
+**Purpose**: Type conversions between Rust types and PostgreSQL types. Enables seamless mapping of UUIDs and timestamps.
+
+**Why chosen**: Essential companion to the postgres crate for working with complex types. The feature flags enable:
+- `with-uuid-1`: Automatic UUID ↔ PostgreSQL UUID conversion
+- `with-chrono-0_4`: DateTime ↔ PostgreSQL TIMESTAMP conversion
+
+**Features enabled**: Custom type support for domain models
+
+**Version**: 0.2.x
+
+```toml
+postgres-types = { version = "0.2", features = ["with-uuid-1", "with-chrono-0_4"] }
+```
+
+Reference: `~/workspace/source/paradedb/Cargo.toml:13`
+</Accordion>
+
+---
+
+### Serialization & Data Formats
+
+<Accordion title="serde - v1.0 / * (derive feature)">
+**Used in**: Chat Server, ParadeDB
+
+**Purpose**: Framework for serializing and deserializing Rust data structures.
+
+**Why chosen**: De facto standard for serialization in Rust. The `derive` feature enables automatic implementation via `#[derive(Serialize, Deserialize)]`.
+
+**Usage**:
+- **Chat**: Message serialization for network protocol
+- **ParadeDB**: JSON file reading and article data structures
+
+**Key locations**:
+- ParadeDB articles: `~/workspace/source/paradedb/src/fetcher.rs:10`
+- Chat (implicit usage for future JSON support)
+
+**Versions**:
+- ParadeDB: v1.0 (explicit)
+- Chat: latest (wildcard)
+
+```toml
+# ParadeDB
+serde = { version = "1.0", features = ["derive"] }
+
+# Chat
+serde = { version = "*", features = ["derive"]}
+```
+</Accordion>
+
+<Accordion title="serde_json - v1.0 / *">
+**Used in**: Chat Server, ParadeDB
+
+**Purpose**: JSON serialization and deserialization built on top of serde.
+
+**Why chosen**: Official JSON implementation for serde, providing efficient and standards-compliant JSON handling.
+
+**Usage**:
+- **ParadeDB**: Reading article data from JSON files
+- **Chat**: Potential future use for message formats
+
+**Key location**: `~/workspace/source/paradedb/src/fetcher.rs:64`
+
+**Versions**:
+- ParadeDB: v1.0
+- Chat: latest
+
+```toml
+serde_json = "1.0"  # ParadeDB
+serde_json = "*"    # Chat
+```
+</Accordion>
+
+---
+
+### CLI & User Interface
+
+<Accordion title="clap - v4 (derive feature)">
+**Used in**: ParadeDB
+
+**Purpose**: Command-line argument parsing with a clean, type-safe API.
+
+**Why chosen**: Industry-standard CLI parsing library with excellent error messages and help generation. The `derive` feature enables declarative CLI definition using Rust structs.
+
+**Features**:
+- Subcommand support (update, search)
+- Automatic help generation
+- Type-safe argument parsing
+- Variadic arguments (`trailing_var_arg`)
+
+**Usage locations**:
+- Command definitions: `~/workspace/source/paradedb/src/main.rs:14-31`
+- Parsing: `~/workspace/source/paradedb/src/main.rs:33-35`
+
+**Version**: v4.x (latest major version)
+
+```toml
+clap = { version = "4", features = ["derive"] }
+```
+
+Reference: `~/workspace/source/paradedb/Cargo.toml:11`
+</Accordion>
+
+---
+
+### Numeric & Precision Types
+
+<Accordion title="rust_decimal - v1.32">
+**Used in**: Order Book
+
+**Purpose**: Fixed-precision decimal numbers for financial calculations.
+
+**Why chosen**: Critical for order matching to avoid floating-point rounding errors that could result in incorrect prices. Provides exact decimal arithmetic required for financial applications.
+
+<Note>
+**Why not f64?** Floating-point types like f64 cannot represent decimal numbers exactly (e.g., 0.1 + 0.2 ≠ 0.3). For financial applications, this is unacceptable as it can lead to incorrect pricing and order matching.
+</Note>
+
+**Key features**:
+- Exact decimal representation
+- Arbitrary precision arithmetic
+- `Ord` and `PartialOrd` implementations for price comparison
+
+**Usage**:
+- Price type alias: `type Price = Decimal;`
+- Order comparisons: `~/workspace/source/order_book/src/main.rs:78`
+- Parsing from strings: `~/workspace/source/order_book/src/main.rs:54`
+
+**Version**: 1.32
+
+```toml
+rust_decimal = "1.32"
+```
+
+Reference: `~/workspace/source/order_book/Cargo.toml:7`
+</Accordion>
+
+---
+
+### Date & Time
+
+<Accordion title="chrono - v0.4 (serde feature)">
+**Used in**: ParadeDB
+
+**Purpose**: Date and time handling with timezone support.
+
+**Why chosen**: Most mature date/time library in Rust with comprehensive timezone support. The `serde` feature enables serialization of timestamps.
+
+**Features**:
+- `DateTime<Utc>` for timezone-aware timestamps
+- Parsing and formatting
+- Serde integration for JSON/database serialization
+
+**Usage**:
+- Article timestamps: `~/workspace/source/paradedb/src/fetcher.rs:15`
+- Database mappings: `~/workspace/source/paradedb/src/db.rs:51`
+
+**Version**: 0.4.x
+
+```toml
+chrono = { version = "0.4", features = ["serde"] }
+```
+
+Reference: `~/workspace/source/paradedb/Cargo.toml:9`
+</Accordion>
+
+---
+
+### Identifiers & UUIDs
+
+<Accordion title="uuid - v1 (v4, serde features)">
+**Used in**: ParadeDB
+
+**Purpose**: UUID generation and handling for article identifiers.
+
+**Why chosen**: Standard UUID implementation with multiple version support. The features enable:
+- `v4`: Random UUID generation
+- `serde`: Serialization support for JSON and database
+
+**Features**:
+- Universally unique identifiers
+- Version 4 (random) UUID generation
+- Seamless database integration via postgres-types
+
+**Usage**:
+- Article IDs: `~/workspace/source/paradedb/src/fetcher.rs:12`
+- Database primary keys: `~/workspace/source/paradedb/src/db.rs:66`
+
+**Version**: 1.x
+
+```toml
+uuid = { version = "1", features = ["v4", "serde"] }
+```
+
+Reference: `~/workspace/source/paradedb/Cargo.toml:10`
+</Accordion>
+
+---
+
+### Error Handling
+
+<Accordion title="thiserror - v1.0">
+**Used in**: ParadeDB
+
+**Purpose**: Ergonomic error type definitions with automatic `std::error::Error` implementation.
+
+**Why chosen**: Reduces boilerplate for custom error types while providing excellent error messages. The `#[error(transparent)]` attribute enables automatic error conversion.
+
+**Features**:
+- Derive macro for error types
+- Automatic `From` implementations
+- Display message customization
+
+**Usage**:
+- SearchError definition: `~/workspace/source/paradedb/src/main.rs:6-12`
+- Automatic error conversion from `postgres::Error` and `std::io::Error`
+
+**Version**: 1.0.x
+
+```toml
+thiserror = "1.0"
+```
+
+Reference: `~/workspace/source/paradedb/Cargo.toml:14`
+</Accordion>
+
+---
+
+### Utilities & Testing
+
+<Accordion title="rand - v0.8.5">
+**Used in**: Chat Server
+
+**Purpose**: Random number generation for client ID assignment.
+
+**Why chosen**: Standard random number library for Rust with good performance and ergonomics.
+
+**Usage**:
+- Random client ID generation: `~/workspace/source/chat/src/server.rs:37`
+- Range: 1000-5000 starting range
+
+**Version**: 0.8.5
+
+```toml
+rand = "0.8.5"
+```
+
+Reference: `~/workspace/source/chat/Cargo.toml:24`
+</Accordion>
+
+---
+
+## Dependency Matrix by Project
+
+### Chat Server (chatroom)
+
+| Dependency | Version | Features | Purpose |
+|------------|---------|----------|---------|
+| tokio | 1 | full | Async runtime and networking |
+| rand | 0.8.5 | - | Client ID generation |
+| serde | * | derive | Message serialization |
+| serde_json | * | - | JSON handling |
+| futures | * | - | Async utilities |
+
+**Total**: 5 dependencies
+
+Reference: `~/workspace/source/chat/Cargo.toml:22-27`
+
+---
+
+### Order Book
+
+| Dependency | Version | Features | Purpose |
+|------------|---------|----------|---------|
+| rust_decimal | 1.32 | - | Precise decimal arithmetic |
+
+**Total**: 1 dependency
+
+<Note>
+**Minimalist Design**: The order book intentionally has minimal dependencies, relying only on rust_decimal for precision. This demonstrates that complex systems don't always require many dependencies.
+</Note>
+
+Reference: `~/workspace/source/order_book/Cargo.toml:6-7`
+
+---
+
+### ParadeDB
+
+| Dependency | Version | Features | Purpose |
+|------------|---------|----------|---------|
+| serde | 1.0 | derive | Data serialization |
+| serde_json | 1.0 | - | JSON file reading |
+| chrono | 0.4 | serde | Timestamp handling |
+| uuid | 1 | v4, serde | Article identifiers |
+| clap | 4 | derive | CLI parsing |
+| postgres | 0.19 | - | Database client |
+| postgres-types | 0.2 | with-uuid-1, with-chrono-0_4 | Type conversions |
+| thiserror | 1.0 | - | Error handling |
+
+**Total**: 8 dependencies (7 unique, postgres-types is a companion)
+
+Reference: `~/workspace/source/paradedb/Cargo.toml:6-14`
+
+---
+
+## Version Strategies
+
+### Explicit vs. Wildcard Versions
+
+The projects use different versioning strategies:
+
+**Explicit versions** (recommended for production):
+```toml
+rust_decimal = "1.32"
+chrono = { version = "0.4", features = ["serde"] }
+```
+
+**Wildcard versions** (used in some examples):
+```toml
+serde_json = "*"
+futures = "*"
+```
+
+<Note>
+**Best Practice**: Use explicit versions for reproducible builds. Wildcard versions (`*`) always fetch the latest, which can cause unexpected breakage. These examples use wildcards for demonstration purposes only.
+</Note>
+
+---
+
+## Common Patterns
+
+### Feature Flags
+
+Many dependencies use feature flags to enable optional functionality:
+
+| Pattern | Example | Reason |
+|---------|---------|--------|
+| Derive macros | `serde = { features = ["derive"] }` | Enables `#[derive(Serialize)]` |
+| Integration | `postgres-types = { features = ["with-uuid-1"] }` | Type compatibility |
+| Capabilities | `tokio = { features = ["full"] }` | Enable all async features |
+
+### Complementary Dependencies
+
+Some dependencies work together:
+
+- **postgres + postgres-types**: Database access + type conversions
+- **serde + serde_json**: Serialization framework + JSON format
+- **uuid + postgres-types**: UUID generation + database integration
+- **chrono + postgres-types**: Time handling + database integration
+
+---
+
+## Build Optimizations
+
+### Release Profile (ParadeDB)
+
+The ParadeDB project includes link-time optimization:
+
+```toml
+[profile.release]
+lto = true
+```
+
+**Benefits**:
+- Smaller binary size
+- Better runtime performance
+- Longer compilation times (trade-off acceptable for CLI tools)
+
+Reference: `~/workspace/source/paradedb/Cargo.toml:16-17`
+
+---
+
+## Dependency Selection Criteria
+
+When choosing dependencies for these examples, the following criteria were applied:
+
+<CardGroup cols={2}>
+  <Card title="Maturity" icon="check">
+    Well-established crates with stable APIs
+  </Card>
+  <Card title="Maintenance" icon="wrench">
+    Active development and community support
+  </Card>
+  <Card title="Documentation" icon="book">
+    Comprehensive docs and examples
+  </Card>
+  <Card title="Performance" icon="gauge-high">
+    Efficient implementations where needed
+  </Card>
+</CardGroup>
+
+### Notable Choices
+
+1. **tokio over async-std**: More widespread adoption and ecosystem support
+2. **postgres over diesel/sqlx**: Simpler for demo purposes, no ORM complexity
+3. **clap v4 over v3**: Latest stable with better derive API
+4. **rust_decimal over f64**: Precision requirements for financial data
+5. **thiserror over anyhow**: Better for library code and specific error types

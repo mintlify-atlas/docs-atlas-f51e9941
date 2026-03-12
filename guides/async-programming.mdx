@@ -1,0 +1,316 @@
+---
+title: 'Async Programming with Tokio'
+description: 'Learn async patterns using real examples from the chat server'
+---
+
+## Overview
+
+Rust's async/await syntax combined with the Tokio runtime enables writing efficient concurrent applications. This guide explores async patterns extracted from our chat server implementation.
+
+## Tokio Runtime Setup
+
+The `#[tokio::main]` macro creates the async runtime:
+
+```rust
+#[tokio::main]
+async fn main() {
+    let addr = "127.0.0.1:8888";
+    Server::start_server(addr).await;
+}
+```
+
+For tests, use `#[tokio::test]`:
+
+```rust
+#[tokio::test]
+async fn test_chatroom() {
+    // Test async code here
+}
+```
+
+## Channels for Communication
+
+Tokio provides two main channel types for message passing between tasks.
+
+### MPSC (Multiple Producer, Single Consumer)
+
+Used for sending messages to a single receiver:
+
+```rust
+use tokio::sync::mpsc;
+
+// Create channel with buffer size
+let (client_msg_producer, client_msg_receiver) = mpsc::channel(256);
+```
+
+From our chat server server.rs:17:
+
+```rust
+let (client_msg_producer, client_msg_receiver) = mpsc::channel(256);
+let (chat_msg_producer, _chat_msg_receiver) = broadcast::channel(256);
+
+let mut chat = Chat::new(client_msg_receiver, chat_msg_producer.clone());
+```
+
+### Broadcast Channels
+
+Used for sending messages to multiple subscribers:
+
+```rust
+use tokio::sync::broadcast;
+
+// Create broadcast channel
+let (chat_msg_producer, _chat_msg_receiver) = broadcast::channel(256);
+
+// Each client gets their own subscriber
+let chat_receiver = chat_msg_producer.subscribe();
+```
+
+<Note>
+Broadcast channels allow multiple receivers to get the same message, perfect for chat applications where all clients need to receive broadcasts.
+</Note>
+
+## Spawning Concurrent Tasks
+
+Use `tokio::spawn` to run async tasks concurrently:
+
+```rust
+// Spawn the chat manager in the background
+let _chat_task = tokio::spawn(async move {
+    chat.run().await;
+});
+```
+
+From server.rs:53-57, spawning a client handler:
+
+```rust
+// Create client connection
+tokio::spawn(async move {
+    ClientConnection::new(socket, client_producer, chat_receiver, client_user_id)
+        .listen()
+        .await
+});
+```
+
+<Tip>
+Each `tokio::spawn` creates a green thread that runs concurrently. The task takes ownership of moved values, allowing safe concurrent access.
+</Tip>
+
+## The select! Macro
+
+`tokio::select!` allows waiting on multiple async operations simultaneously, proceeding when **any** branch completes:
+
+```rust
+use tokio::select;
+
+loop {
+    select! {
+        // Drain chat & send messages to client
+        result = self.consumer.recv() => {
+            let msg = result.unwrap();
+            Self::send_message(&mut writer, msg.into()).await?;
+        }
+
+        // Read messages from client and send to chatroom
+        result = Self::drain_client_msg(&mut buf_reader) => {
+            match result {
+                Ok(Some(msg)) => {
+                    Self::send_message(&mut writer, OutgoingMessage::Ack(msg.produce().clone())).await?;
+                    self.chatroom.send(msg.into()).await.expect("Couldn't send message");
+                }
+                Ok(None) => (),
+                Err(e) => break,
+            }
+        }
+    }
+}
+```
+
+This pattern from client.rs:82-111 shows how the client connection handles both:
+- Receiving broadcast messages from the chatroom
+- Reading messages from the TCP socket
+
+<Warning>
+The `select!` macro is biased by default - branches are checked in order. If you need fair selection, use `biased;` to disable this behavior.
+</Warning>
+
+## Async I/O Operations
+
+Tokio provides async versions of I/O operations:
+
+```rust
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
+
+// Split stream into reader and writer
+let (reader, mut writer) = self.socket.split();
+let mut buf_reader = BufReader::new(reader);
+
+// Async write
+writer.write_all(msg_str.as_bytes()).await?;
+
+// Async read
+reader.read_buf(&mut buffer).await?;
+```
+
+### Line-by-Line Reading
+
+From client.rs:31-45, reading lines asynchronously:
+
+```rust
+use tokio::io::AsyncBufReadExt;
+
+async fn drain_client_msg<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+) -> Result<Option<ServerAction>, io::Error> {
+    if let Some(line) = reader.lines().next_line().await? {
+        if !line.trim().is_empty() {
+            let msg = line
+                .parse::<ServerAction>()
+                .map(|e| Some(e))
+                .map_err(|e| io::Error::other(e));
+            return msg;
+        }
+    }
+    Ok(None)
+}
+```
+
+## Comparison: Async vs Sync
+
+<Tabs>
+  <Tab title="Async (Tokio)">
+    ```rust
+    use tokio::net::TcpListener;
+
+    async fn start_server(addr: &str) {
+        let listener = TcpListener::bind(addr).await
+            .expect("Couldn't establish connection");
+
+        loop {
+            let (socket, _) = listener.accept().await
+                .expect("Couldn't accept connection");
+
+            // Each connection runs concurrently
+            tokio::spawn(async move {
+                handle_client(socket).await
+            });
+        }
+    }
+    ```
+    
+    **Advantages:**
+    - Handles thousands of concurrent connections efficiently
+    - Non-blocking I/O
+    - Better resource utilization
+  </Tab>
+  
+  <Tab title="Sync (Traditional)">
+    ```rust
+    use std::net::TcpListener;
+
+    fn start_server(addr: String) {
+        let socket = TcpListener::bind(addr).unwrap();
+        let mut stream = socket.incoming();
+
+        loop {
+            if let Some(Ok(conn)) = stream.next() {
+                handle_connection(conn);
+            }
+            
+            // Must poll all clients in the same thread
+            run_chat()
+        }
+    }
+    ```
+    
+    **Limitations:**
+    - Single-threaded event loop
+    - Manual polling required
+    - Less efficient for many connections
+  </Tab>
+</Tabs>
+
+The sync version from sync_server.rs requires manually polling all clients in a loop, while the async version allows each connection to run independently.
+
+## Testing Async Code
+
+From server.rs:117-133, creating async test clients:
+
+```rust
+#[tokio::test]
+async fn test_chatroom() {
+    let addr = "127.0.0.1:8888";
+
+    // Server runs in separate thread with its own runtime
+    let _server_thread = std::thread::spawn(|| {
+        let runtime = Runtime::new().unwrap();
+        runtime.block_on(async { Server::start_server(addr).await });
+    });
+
+    // Wait for server startup
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    // Create channels for test client communication
+    let (c1_producer, c1_consumer) = mpsc::channel(256);
+    let (c1_chat_producer, mut c1_chat_consumer) = mpsc::channel(256);
+    
+    // Test client operations...
+}
+```
+
+<Note>
+When testing servers, you may need to create separate runtimes for the server and clients to avoid deadlocks. Use `Runtime::new()` and `block_on()` for this pattern.
+</Note>
+
+## Best Practices
+
+1. **Channel Sizing**: Choose appropriate buffer sizes (e.g., 256) based on your throughput needs
+2. **Error Handling**: Always handle channel send/receive errors - they indicate disconnections
+3. **Graceful Shutdown**: Listen for shutdown signals in your `select!` branches
+4. **Avoid Blocking**: Never call blocking operations in async code - use `tokio::task::spawn_blocking` for CPU-intensive work
+
+## Common Patterns
+
+### Producer-Consumer
+
+```rust
+// Multiple producers send to single consumer
+let (tx, mut rx) = mpsc::channel(256);
+
+tokio::spawn(async move {
+    while let Some(msg) = rx.recv().await {
+        process_message(msg).await;
+    }
+});
+```
+
+### Pub-Sub
+
+```rust
+// One producer, many subscribers
+let (tx, _rx) = broadcast::channel(256);
+
+let subscriber1 = tx.subscribe();
+let subscriber2 = tx.subscribe();
+```
+
+### Request-Response
+
+```rust
+// Client sends request with reply channel
+struct Request {
+    data: String,
+    reply: oneshot::Sender<Response>,
+}
+
+let (reply_tx, reply_rx) = oneshot::channel();
+tx.send(Request { data, reply: reply_tx }).await?;
+let response = reply_rx.await?;
+```
+
+## Further Reading
+
+- [Tokio Tutorial](https://tokio.rs/tokio/tutorial)
+- [Async Book](https://rust-lang.github.io/async-book/)
+- Source: `chat/src/server.rs` and `chat/src/client.rs`

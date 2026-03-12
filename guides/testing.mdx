@@ -1,0 +1,411 @@
+---
+title: 'Testing in Rust'
+description: 'Testing patterns and best practices from our example projects'
+---
+
+## Overview
+
+Rust has excellent built-in testing support. This guide covers unit testing, async testing, and test organization patterns extracted from real examples.
+
+## Basic Unit Tests
+
+Unit tests live in the same file as the code they test, inside a `#[cfg(test)]` module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_submit_order_no_match() {
+        let mut engine = MatchingEngine::new();
+        let order = Order::new("10.0050".parse().unwrap(), 100, Side::Buy);
+        let trades = engine.submit_order(order);
+        assert_eq!(trades.len(), 0);
+    }
+}
+```
+
+<Note>
+The `#[cfg(test)]` attribute ensures test code is only compiled when running `cargo test`, keeping your release binaries lean.
+</Note>
+
+## Test Organization
+
+From order_book/src/main.rs:226-413, tests are organized with:
+
+1. **Setup functions** for common initialization
+2. **Test fixtures** for reusable test data
+3. **Helper utilities** shared across tests
+
+### Setup Patterns
+
+The order book tests use a `reset_order_id()` helper to ensure tests start with clean state:
+
+```rust
+fn reset_order_id() {
+    NEXT_ORDER_ID.store(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[test]
+fn test_submit_order_with_match() {
+    reset_order_id();  // Reset state before test
+
+    let mut engine = MatchingEngine::new();
+    // Test implementation...
+}
+```
+
+<Tip>
+Always reset global state in tests to prevent test interdependence. Tests should be able to run in any order.
+</Tip>
+
+## Assertion Patterns
+
+Rust provides several assertion macros:
+
+<CodeGroup>
+```rust Equality
+#[test]
+fn test_exact_price_match() {
+    reset_order_id();
+    
+    let mut engine = MatchingEngine::new();
+    let bid = Order::new("10.5555".parse().unwrap(), 100, Side::Buy);
+    let ask = Order::new("10.5555".parse().unwrap(), 100, Side::Sell);
+
+    engine.submit_order(bid);
+    let trades = engine.submit_order(ask);
+
+    assert_eq!(trades.len(), 1);
+    assert_eq!(trades[0].price, "10.5555".parse().unwrap());
+    assert_eq!(trades[0].quantity, 100);
+}
+```
+
+```rust Collections
+#[test]
+fn test_zero_quantity_cleanup() {
+    reset_order_id();
+    
+    let mut engine = MatchingEngine::new();
+    let bid = Order::new("10.00".parse().unwrap(), 50, Side::Buy);
+    let ask = Order::new("10.00".parse().unwrap(), 50, Side::Sell);
+
+    engine.submit_order(bid);
+    engine.submit_order(ask);
+
+    // Both orders should be completely filled and removed
+    assert_eq!(engine.bid.len(), 0);
+    assert_eq!(engine.ask.len(), 0);
+}
+```
+
+```rust Boolean
+#[test]
+fn test_validation() {
+    let result = validate_input("valid");
+    assert!(result.is_ok());
+    
+    let result = validate_input("invalid");
+    assert!(result.is_err());
+}
+```
+</CodeGroup>
+
+## Testing Panics
+
+Use `#[should_panic]` to test that code panics as expected:
+
+```rust
+#[test]
+#[should_panic(expected = "Price must be positive")]
+fn test_invalid_price() {
+    Order::new(Decimal::ZERO, 100, Side::Buy);
+}
+```
+
+This test from order_book/src/main.rs:365-368 verifies that creating an order with zero price panics with the correct message.
+
+<Warning>
+Only use `should_panic` for testing invariant violations. For normal error conditions, use `Result` and test with `assert!(result.is_err())`.
+</Warning>
+
+## Complex Test Scenarios
+
+### Multi-Step Tests
+
+From order_book/src/main.rs:250-282, testing sequential operations:
+
+```rust
+#[test]
+fn test_submit_order_with_match() {
+    reset_order_id();
+
+    let mut engine = MatchingEngine::new();
+    let bid_order = Order::new("10.0050".parse().unwrap(), 100, Side::Buy);
+    let ask_order = Order::new("09.0030".parse().unwrap(), 50, Side::Sell);
+
+    // Submit bid
+    let trades = engine.submit_order(bid_order);
+    assert_eq!(trades.len(), 0);
+
+    // Submit ask. This should match the bid.
+    let trades = engine.submit_order(ask_order);
+    assert_eq!(trades.len(), 1);
+    assert_eq!(trades[0].price, "10.0050".parse().unwrap());
+    assert_eq!(trades[0].quantity, 50);
+    assert_eq!(trades[0].party_order_id, 2);
+    assert_eq!(trades[0].counterparty_order_id, 1);
+
+    // Submit another ask order. Should match again.
+    let ask_order = Order::new("09.0030".parse().unwrap(), 50, Side::Sell);
+    let trades = engine.submit_order(ask_order);
+    assert_eq!(trades.len(), 1);
+    
+    // Submit another ask order. Shouldn't match anymore.
+    let ask_order = Order::new("09.0030".parse().unwrap(), 50, Side::Sell);
+    let trades = engine.submit_order(ask_order);
+    assert_eq!(trades.len(), 0);
+}
+```
+
+This test verifies:
+1. Orders don't match when prices don't cross
+2. Matching produces correct trades
+3. Partial fills work correctly
+4. Order book state is maintained
+
+### Testing Multiple Price Levels
+
+From order_book/src/main.rs:308-328:
+
+```rust
+#[test]
+fn test_multiple_price_levels() {
+    reset_order_id();
+
+    let mut engine = MatchingEngine::new();
+
+    // Create multiple bids at different prices
+    let bid1 = Order::new("10.00".parse().unwrap(), 50, Side::Buy);
+    let bid2 = Order::new("9.90".parse().unwrap(), 50, Side::Buy);
+    engine.submit_order(bid1);
+    engine.submit_order(bid2);
+
+    // Large ask order that should match both bids
+    let ask = Order::new("9.80".parse().unwrap(), 100, Side::Sell);
+    let trades = engine.submit_order(ask);
+
+    assert_eq!(trades.len(), 2);
+    assert_eq!(trades[0].price, "10.00".parse().unwrap());
+    assert_eq!(trades[0].quantity, 50);
+    assert_eq!(trades[1].price, "9.90".parse().unwrap());
+    assert_eq!(trades[1].quantity, 50);
+}
+```
+
+## Async Testing
+
+Tests for async code use `#[tokio::test]`:
+
+```rust
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    runtime::Runtime,
+    select,
+    sync::mpsc::{self, Receiver, Sender},
+};
+
+#[tokio::test]
+async fn test_chatroom() {
+    let addr = "127.0.0.1:8888";
+
+    // Create a thread that runs its own tokio runtime
+    let _server_thread = std::thread::spawn(|| {
+        let runtime = Runtime::new().unwrap();
+        runtime.block_on(async { Server::start_server(addr).await });
+    });
+
+    // Wait for server to start up
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    // Test implementation...
+}
+```
+
+### Async Test Patterns
+
+From server.rs:80-115, creating an interactive test client:
+
+```rust
+async fn interactive_client(
+    addr: &str,
+    mut consumer: Receiver<String>,
+    producer: Sender<String>,
+) -> tokio::io::Result<()> {
+    let mut stream = TcpStream::connect(addr).await?;
+    let (mut reader, mut writer) = stream.split();
+    let mut buffer = Vec::new();
+
+    loop {
+        buffer.fill(0);
+        select! {
+            result = reader.read_buf(&mut buffer) => {
+                if result.is_err() {
+                    break;
+                }
+                let msg_from_server = String::from_utf8_lossy(&buffer).to_string();
+                producer.send(msg_from_server).await.unwrap();
+            }
+            msg = consumer.recv() => {
+                writer.write_all(msg.unwrap().as_bytes()).await.unwrap();
+            }
+        }
+    }
+
+    Ok(())
+}
+```
+
+### Testing Message Passing
+
+From server.rs:159-173:
+
+```rust
+// c1 announces name
+c1_producer.send(String::from("Hi I'm C1\n")).await.unwrap();
+
+// Check that we got a login message then followed by what we sent
+let msg = c1_chat_consumer.recv().await.unwrap();
+assert!(msg.starts_with("LOGIN:"));
+
+let msg = c2_chat_consumer.recv().await.unwrap();
+assert!(msg.starts_with("LOGIN:"));
+
+let msg = c1_chat_consumer.recv().await.unwrap();
+assert!(msg.contains("ACK:MESSAGE\n:"));
+
+let msg = c1_chat_consumer.recv().await.unwrap();
+assert!(msg.contains("Hi I'm C1\n"));
+```
+
+<Note>
+Async tests can verify message ordering and timing behavior that would be difficult to test synchronously.
+</Note>
+
+## Test Isolation
+
+### Separate Runtimes for Server Tests
+
+From server.rs:122-128:
+
+```rust
+// Create a thread that runs its own tokio runtime
+let _server_thread = std::thread::spawn(|| {
+    // Create a new tokio runtime for this thread
+    let runtime = Runtime::new().unwrap();
+    
+    // Run the async server on this runtime
+    runtime.block_on(async { Server::start_server(addr).await });
+});
+```
+
+This pattern prevents deadlocks by running the server in a separate runtime from the test clients.
+
+## Property-Based Testing
+
+Test edge cases and invariants:
+
+```rust
+#[test]
+fn test_price_time_priority() {
+    reset_order_id();
+
+    let mut engine = MatchingEngine::new();
+
+    // Create two asks at same price, different times
+    let ask1 = Order::new("10.00".parse().unwrap(), 50, Side::Sell);
+    let ask2 = Order::new("10.00".parse().unwrap(), 50, Side::Sell);
+    engine.submit_order(ask1);
+    engine.submit_order(ask2);
+
+    // Submit matching bid
+    let bid = Order::new("10.00".parse().unwrap(), 50, Side::Buy);
+    let trades = engine.submit_order(bid);
+
+    // Earlier order should match first (FIFO)
+    assert_eq!(trades.len(), 1);
+    assert_eq!(trades[0].counterparty_order_id, 1);  // First ask
+}
+```
+
+## Running Tests
+
+<CodeGroup>
+```bash All Tests
+cargo test
+```
+
+```bash Specific Test
+cargo test test_submit_order_with_match
+```
+
+```bash Show Output
+cargo test -- --nocapture
+```
+
+```bash Single Thread
+cargo test -- --test-threads=1
+```
+</CodeGroup>
+
+<Tip>
+Use `--test-threads=1` when tests share global state or when debugging test failures that only occur with parallel execution.
+</Tip>
+
+## Best Practices
+
+1. **Test Naming**: Use descriptive names that explain what's being tested
+   - `test_submit_order_no_match` ✓
+   - `test1` ✗
+
+2. **Arrange-Act-Assert**: Structure tests clearly
+   ```rust
+   // Arrange: Set up test data
+   reset_order_id();
+   let mut engine = MatchingEngine::new();
+   
+   // Act: Perform the operation
+   let trades = engine.submit_order(order);
+   
+   // Assert: Verify the result
+   assert_eq!(trades.len(), 0);
+   ```
+
+3. **Test One Thing**: Each test should verify a single behavior
+
+4. **Avoid Test Interdependence**: Tests should pass regardless of execution order
+
+5. **Use Helper Functions**: Extract common setup into helper functions like `reset_order_id()`
+
+## Common Pitfalls
+
+<Warning>
+**Time-Based Tests**: The chat test uses `std::thread::sleep(Duration::from_secs(1))` to wait for server startup. This is fragile - prefer synchronization mechanisms when possible.
+</Warning>
+
+<Warning>
+**Port Conflicts**: When testing network code, either use random ports (`bind("127.0.0.1:0")`) or ensure tests don't run in parallel.
+</Warning>
+
+<Warning>
+**Floating Point Comparisons**: Use decimal types for precise comparisons in financial calculations, not `f64`.
+</Warning>
+
+## Further Reading
+
+- [The Rust Book - Testing](https://doc.rust-lang.org/book/ch11-00-testing.html)
+- [Tokio Testing Guide](https://tokio.rs/tokio/topics/testing)
+- Source: `order_book/src/main.rs` (lines 226-413) and `chat/src/server.rs` (lines 69-179)

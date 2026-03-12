@@ -1,0 +1,431 @@
+---
+title: 'Architecture Overview'
+description: 'Detailed architectural documentation for all Rust examples'
+---
+
+## Repository Structure
+
+This repository contains three independent Rust example projects, each demonstrating different architectural patterns and design approaches:
+
+<CardGroup cols={3}>
+  <Card title="Chat Server" icon="comments" href="#chat-server-architecture">
+    Async messaging with Tokio
+  </Card>
+  <Card title="Order Book" icon="chart-line" href="#order-book-architecture">
+    High-performance matching engine
+  </Card>
+  <Card title="ParadeDB" icon="database" href="#paradedb-architecture">
+    Full-text search system
+  </Card>
+</CardGroup>
+
+---
+
+## Chat Server Architecture
+
+The chat server demonstrates asynchronous client-server architecture using Tokio, with both async and synchronous implementations.
+
+### Module Organization
+
+The chat server is organized into the following modules:
+
+- **`server.rs`** - Main async server implementation and entry point
+- **`sync_server.rs`** - Single-threaded synchronous server implementation
+- **`client.rs`** - Client connection handler
+- **`chat.rs`** - Central chat room logic and message broadcasting
+- **`types.rs`** - Shared type definitions and message protocols
+
+Source: `~/workspace/source/chat/src/`
+
+### Async Server Design Pattern
+
+The async server uses a multi-task architecture with channel-based communication:
+
+```rust
+// Channel structure
+(client_msg_producer, client_msg_receiver) = mpsc::channel(256)
+(chat_msg_producer, chat_msg_receiver) = broadcast::channel(256)
+```
+
+<Note>
+**Design Decision**: The architecture separates client connections from the central chat logic using channels. This enables each client to run independently without blocking others.
+</Note>
+
+#### Data Flow
+
+```
+┌─────────────┐
+│   Client 1  │──┐
+└─────────────┘  │
+                 │  mpsc::Sender
+┌─────────────┐  │  (client → chat)
+│   Client 2  │──┼─────────────────► ┌──────────────┐
+└─────────────┘  │                   │  Chat Room   │
+                 │                   │   (central)  │
+┌─────────────┐  │                   └──────────────┘
+│   Client N  │──┘                          │
+└─────────────┘                             │
+      ▲                                     │
+      │         broadcast::Sender           │
+      └─────────────────────────────────────┘
+              (chat → all clients)
+```
+
+### Key Components
+
+<Accordion title="Server (server.rs:16-59)">
+The server initializes communication channels, spawns the chat manager task, and accepts incoming TCP connections. Each new connection:
+1. Receives a randomly assigned incrementing user ID (starting from 1000-5000 range)
+2. Gets its own producer channel to send messages to the chat room
+3. Subscribes to the broadcast channel to receive messages from the chat room
+4. Spawns in its own async task via `tokio::spawn`
+
+Reference: `~/workspace/source/chat/src/server.rs:37-50`
+</Accordion>
+
+<Accordion title="ClientConnection (client.rs:9-115)">
+Handles bidirectional communication for a single client connection:
+- **Inbound**: Reads messages from the TCP socket and forwards to the chat room
+- **Outbound**: Receives broadcast messages and sends them to the client
+- Uses `tokio::select!` to handle both operations concurrently without blocking
+
+The client sends an acknowledgment for each message received before forwarding it to the chat room.
+
+Reference: `~/workspace/source/chat/src/client.rs:76-112`
+</Accordion>
+
+<Accordion title="Chat Room (chat.rs:7-77)">
+Central message broker that:
+- Receives messages from all clients via an mpsc channel
+- Broadcasts messages to all clients via a broadcast channel
+- Includes a simple order book implementation for matching buy/sell orders
+
+**Key method**: `handle_action` processes incoming actions and broadcasts trade matches.
+
+Reference: `~/workspace/source/chat/src/chat.rs:27-68`
+</Accordion>
+
+### Synchronous Implementation
+
+The `sync_server.rs` provides an alternative single-threaded implementation using non-blocking I/O and polling:
+
+<Note>
+**Architectural Difference**: The sync server maintains all client connections in a single thread and uses a polling loop to check for new messages. This avoids the complexity of async runtimes but requires careful management of blocking operations.
+</Note>
+
+**Key characteristics**:
+- Non-blocking TCP streams (`set_nonblocking(true)`)
+- Manual polling of all clients in a loop
+- Message replay for new clients (sends chat history on connection)
+- No async runtime overhead
+
+Reference: `~/workspace/source/chat/src/sync_server.rs:102-215`
+
+### Protocol Design
+
+The chat system uses a simple text-based protocol defined in `types.rs`:
+
+| Message Type | Format | Direction |
+|-------------|--------|-----------|
+| Login | `LOGIN:{client_id}` | Server → Client |
+| Acknowledgment | `ACK:{produce}` | Server → Client |
+| Trade | `TRADE:{produce}` | Server → All Clients |
+| Error | `ERROR:{message}` | Server → Client |
+| Buy Order | `BUY:{produce}` | Client → Server |
+| Sell Order | `SELL:{produce}` | Client → Server |
+
+Reference: `~/workspace/source/chat/src/types.rs:7-95`
+
+---
+
+## Order Book Architecture
+
+The order book implements a high-performance order matching engine with focus on simplicity and correctness.
+
+### Module Organization
+
+Single-file implementation in `~/workspace/source/order_book/src/main.rs` containing:
+- `Order` - Order representation with price, quantity, and side
+- `MatchingEngine` - Core matching logic using BTreeSet
+- `Trade` - Trade execution record
+- `Side` - Buy/Sell enumeration
+
+### BTreeSet Design Choice
+
+<Note>
+**Performance Tradeoff**: BTreeSet was chosen for its balance of simplicity and performance (O(log n) operations). While more performant implementations exist (e.g., price-level vectors like Nasdaq uses, or doubly-linked lists with price pointers), BTreeSet provides cleaner code without sacrificing much performance for this demonstration.
+</Note>
+
+From the README:
+> "This approach prioritizes **simplicity**. More performant implementations exist such as using a vector for all possible price levels (like Nasdaq does). Many other implementations use a doubly linked list, maintaining pointers to the current price."
+
+Reference: `~/workspace/source/order_book/README.md:13`
+
+### Order Priority System
+
+Orders are matched using a two-tier priority system:
+
+1. **Price Priority** - Best prices are matched first
+   - Buy orders: Higher prices first
+   - Sell orders: Lower prices first
+
+2. **Time Priority** - For orders at the same price level
+   - Earlier orders (lower ID) are matched first
+   - Order IDs are assigned sequentially via `AtomicU64`
+
+```rust
+impl PartialOrd for Order {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        if self.price == other.price {
+            // Earlier id should be matched first
+            self.id.partial_cmp(&other.id)
+        } else {
+            self.price.partial_cmp(&other.price)
+        }
+    }
+}
+```
+
+Reference: `~/workspace/source/order_book/src/main.rs:72-80`
+
+### Matching Algorithm
+
+The matching engine maintains two BTreeSets (bid and ask sides):
+
+```rust
+struct MatchingEngine {
+    bid: BTreeSet<Order>,   // Buy orders (sorted highest to lowest)
+    ask: BTreeSet<Order>,   // Sell orders (sorted lowest to highest)
+}
+```
+
+#### Matching Process
+
+1. **Order Submission**: New order is inserted into appropriate BTreeSet (O(log n))
+2. **Match Check**: Algorithm checks if best bid >= best ask
+3. **Execution Loop**: While orders can be matched:
+   - Pop best bid (highest price) and best ask (lowest price)
+   - Calculate matched quantity: `min(bid.quantity, ask.quantity)`
+   - Determine trade price (liquidity taker gets best price)
+   - Create trade record
+   - Re-insert partially filled orders
+4. **Result**: Returns vector of executed trades
+
+Reference: `~/workspace/source/order_book/src/main.rs:138-191`
+
+#### Price Improvement
+
+The taker (later order) receives price improvement:
+
+```rust
+let (trade_price, party_order_id, counterparty_order_id) =
+    if bid_order.id > ask_order.id {
+        (ask_order.price, bid_order.id, ask_order.id)  // Bid is taker
+    } else {
+        (bid_order.price, ask_order.id, bid_order.id)  // Ask is taker
+    };
+```
+
+The taker always gets the maker's price, which is better than their submitted price when there's a spread.
+
+Reference: `~/workspace/source/order_book/src/main.rs:161-166`
+
+### Data Structures
+
+<Accordion title="Order Type">
+```rust
+struct Order {
+    id: OrderIdentifier,      // Atomic incrementing u64
+    price: Decimal,           // rust_decimal for precision
+    quantity: u64,            // Number of units
+    side: Side,               // Buy or Sell
+}
+```
+
+Uses `rust_decimal::Decimal` to avoid floating-point precision issues common in financial applications.
+
+Reference: `~/workspace/source/order_book/src/main.rs:15-23`
+</Accordion>
+
+<Accordion title="Trade Type">
+```rust
+struct Trade {
+    price: Price,                          // Execution price
+    quantity: Quantity,                    // Filled quantity
+    party_order_id: OrderIdentifier,       // Taker order
+    counterparty_order_id: OrderIdentifier // Maker order
+}
+```
+
+Records the details of each matched trade for audit and reporting purposes.
+
+Reference: `~/workspace/source/order_book/src/main.rs:100-106`
+</Accordion>
+
+---
+
+## ParadeDB Architecture
+
+The ParadeDB example demonstrates a full-text search system using PostgreSQL with ParadeDB extensions.
+
+### Module Organization
+
+- **`main.rs`** - CLI interface, command routing, and application initialization
+- **`db.rs`** - Database connection management and query execution
+- **`fetcher.rs`** - Article data structures and JSON file reading
+
+Source: `~/workspace/source/paradedb/src/`
+
+### Database Connection Pattern
+
+<Note>
+**Design Pattern**: The application uses a simple, direct connection pattern with the PostgreSQL client rather than a connection pool. This is appropriate for a CLI tool where connections are short-lived.
+</Note>
+
+```rust
+pub struct DbConnection {
+    client: Client,
+}
+
+impl DbConnection {
+    pub fn new() -> Result<Self, postgres::Error> {
+        let client = Client::connect(
+            "host=localhost port=5433 user=postgres password=postgres123 dbname=parade",
+            NoTls,
+        )?;
+        Ok(Self { client })
+    }
+}
+```
+
+Reference: `~/workspace/source/paradedb/src/db.rs:7-20`
+
+### Search Implementation
+
+The search uses ParadeDB's BM25 full-text search index:
+
+```sql
+SELECT id, title, content, published_at, paradedb.score(id) 
+FROM articles 
+WHERE title @@ $1 OR content @@ $1 
+ORDER BY score DESC
+```
+
+**Search Strategy**:
+- Searches both title and content fields
+- Uses `@@` text search operator
+- Returns results ranked by relevance score
+- Scores calculated via `paradedb.score()` function
+
+Reference: `~/workspace/source/paradedb/src/db.rs:37-43`
+
+### Data Layer Separation
+
+The application maintains clean separation between data structures and database:
+
+<Accordion title="Article Type (fetcher.rs)">
+```rust
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Article {
+    id: Uuid,
+    title: String,
+    content: String,
+    published_at: DateTime<Utc>,
+}
+```
+
+Intentionally decoupled from database implementation, making it easy to swap out storage backends.
+
+Reference: `~/workspace/source/paradedb/src/fetcher.rs:7-16`
+</Accordion>
+
+### Database Initialization
+
+The `init_database` method creates tables and indexes:
+
+```sql
+CREATE TABLE IF NOT EXISTS articles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    published_at TIMESTAMP WITH TIME ZONE NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS articles_search_idx 
+ON articles 
+USING bm25(id, title, content) 
+WITH (key_field='id');
+```
+
+**Key Points**:
+- UUID primary keys with automatic generation
+- Timestamp with timezone for published dates
+- BM25 index for full-text search on title and content
+
+Reference: `~/workspace/source/paradedb/src/db.rs:61-75`
+
+### Command-Line Interface
+
+The application uses `clap` for CLI parsing with a subcommand structure:
+
+```rust
+enum Command {
+    Update,              // Load articles from JSON into database
+    Search { query: Vec<String> }  // Search for articles
+}
+```
+
+**Workflow**:
+1. Parse command-line arguments
+2. Initialize database connection
+3. Execute appropriate command (update or search)
+4. Display results
+
+Reference: `~/workspace/source/paradedb/src/main.rs:21-31`
+
+### Error Handling
+
+Uses `thiserror` for clean error type definitions:
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum SearchError {
+    #[error(transparent)]
+    PostgresError(#[from] postgres::Error),
+    #[error(transparent)]
+    ErrorReadingJsonError(#[from] std::io::Error),
+}
+```
+
+This provides automatic error conversion and descriptive error messages.
+
+Reference: `~/workspace/source/paradedb/src/main.rs:6-12`
+
+---
+
+## Common Patterns Across Examples
+
+### Error Handling Approaches
+
+| Project | Strategy | Rationale |
+|---------|----------|-----------|
+| Chat | `Result<(), io::Error>` | Simple I/O errors, propagated naturally |
+| Order Book | `panic!` on invalid state | Fast failure for invariant violations |
+| ParadeDB | Custom `SearchError` with `thiserror` | Multiple error sources need consolidation |
+
+### Concurrency Models
+
+| Project | Model | Use Case |
+|---------|-------|----------|
+| Chat (Async) | Tokio with channels | Multiple independent clients, I/O bound |
+| Chat (Sync) | Single-threaded polling | Demonstrates non-async approach |
+| Order Book | Single-threaded | CPU-bound matching logic, no concurrency needed |
+| ParadeDB | Synchronous | CLI tool with sequential operations |
+
+### Testing Philosophy
+
+All three projects include comprehensive unit tests:
+
+- **Chat**: Integration tests with multiple client connections (`server.rs:118-177`)
+- **Order Book**: Extensive test suite covering matching scenarios (`main.rs:226-412`)
+- **ParadeDB**: Relies on database integrity and manual testing

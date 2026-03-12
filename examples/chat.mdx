@@ -1,0 +1,441 @@
+---
+title: 'Async Chatroom Server'
+description: 'Multi-client chatroom server with async and sync implementations in Rust'
+---
+
+## Overview
+
+This example demonstrates building a production-ready chatroom server in Rust that supports multiple concurrent clients and broadcasts messages between them. The implementation showcases both an async implementation using `tokio` and a single-threaded synchronous alternative.
+
+### What You'll Learn
+
+- Async programming with Tokio runtime
+- TCP socket handling with multiple concurrent connections
+- Message broadcasting architecture using channels
+- Single-threaded vs multi-threaded server design
+- Client connection lifecycle management
+
+## Architecture
+
+The chatroom server uses a **centralized broadcast pattern** with two main components:
+
+### 1. Chat Manager
+
+The `Chat` struct acts as the central message broker, maintaining chat history and coordinating message broadcasts.
+
+```rust
+pub struct Chat {
+    chat: Vec<OutgoingMessage>,
+    receiver: mpsc::Receiver<ServerAction>,
+    broadcaster: broadcast::Sender<OutgoingMessage>,
+    order_books: HashMap<Produce, VecDeque<Side>>,
+}
+```
+
+**Key Responsibilities:**
+- Receives actions from all connected clients via `mpsc::Receiver`
+- Broadcasts messages to all clients via `broadcast::Sender`
+- Maintains order books for Buy/Sell matching (trading functionality)
+- Runs in its own async task in the background
+
+### 2. Client Connections
+
+Each client connection is handled by a `ClientConnection` struct that manages bidirectional communication.
+
+```rust
+pub struct ClientConnection {
+    socket: TcpStream,
+    client_id: ClientId,
+    chatroom: mpsc::Sender<ServerAction>,
+    consumer: broadcast::Receiver<OutgoingMessage>,
+}
+```
+
+**Key Responsibilities:**
+- Reads incoming messages from the client socket
+- Sends messages to the Chat manager for broadcasting
+- Receives broadcast messages and forwards them to the client
+- Uses `tokio::select!` to handle concurrent read/write operations
+
+## Async Implementation
+
+### Server Startup
+
+The async server creates communication channels and spawns the Chat manager before accepting connections:
+
+```rust
+async fn start_server(addr: &str) {
+    let (client_msg_producer, client_msg_receiver) = mpsc::channel(256);
+    let (chat_msg_producer, _chat_msg_receiver) = broadcast::channel(256);
+
+    let mut chat = Chat::new(client_msg_receiver, chat_msg_producer.clone());
+
+    // Chat manager runs in background
+    let _chat_task = tokio::spawn(async move {
+        chat.run().await;
+    });
+
+    // Listen for clients
+    let listener = TcpListener::bind(addr).await
+        .expect("Couldn't establish connection to socket");
+
+    let mut user_id = thread_rng().gen_range(1000..5000);
+
+    loop {
+        let (socket, _) = listener.accept().await
+            .expect("Couldn't accept connection.");
+
+        let client_producer = client_msg_producer.clone();
+        let chat_receiver = chat_msg_producer.subscribe();
+        let client_user_id = user_id;
+        user_id += 1;
+
+        // Spawn new task for each client
+        tokio::spawn(async move {
+            ClientConnection::new(socket, client_producer, chat_receiver, client_user_id)
+                .listen()
+                .await
+        });
+    }
+}
+```
+
+<Note>
+Client IDs are randomly generated starting from 1000-5000, then incremented sequentially. This simple approach works for the assignment scope but should use a more robust ID generation strategy in production.
+</Note>
+
+### Client Message Handling
+
+The client connection uses `tokio::select!` to concurrently handle both incoming and outgoing messages:
+
+```rust
+pub async fn listen(&mut self) -> Result<(), io::Error> {
+    let (reader, mut writer) = self.socket.split();
+    let mut buf_reader = BufReader::new(reader);
+
+    // Send login message
+    Self::send_message(&mut writer, OutgoingMessage::Login(self.client_id)).await?;
+
+    loop {
+        tokio::select! {
+            // Receive broadcasts from chatroom
+            result = self.consumer.recv() => {
+                let msg = result.unwrap();
+                Self::send_message(&mut writer, msg.into()).await?;
+            }
+
+            // Read messages from client
+            result = Self::drain_client_msg(&mut buf_reader) => {
+                match result {
+                    Ok(Some(msg)) => {
+                        // Send ACK to client
+                        Self::send_message(&mut writer, OutgoingMessage::Ack(msg.produce().clone())).await?;
+                        
+                        // Send to chatroom for broadcast
+                        self.chatroom.send(msg.into()).await.expect("Couldn't send message");
+                    }
+                    Ok(None) => (),
+                    Err(e) if e.kind() == io::ErrorKind::Other => {
+                        Self::send_message(&mut writer, OutgoingMessage::Error(e.to_string())).await?;
+                    }
+                    Err(e) => break, // Client disconnected
+                }
+            }
+        }
+    }
+    Ok(())
+}
+```
+
+<Tip>
+The `tokio::select!` macro enables concurrent event handling without blocking. This means the server can receive broadcasts while waiting for client input, and vice versa.
+</Tip>
+
+## Sync Implementation
+
+### Single-Threaded Design
+
+The synchronous implementation (`sync_server.rs`) uses a completely different architecture:
+
+```rust
+struct Server {
+    clients: Vec<Client>,
+    messages: Vec<ServerMessage>,
+    last_broadcast_msg_num: usize,
+    next_client_id: ClientId,
+}
+```
+
+**Event Loop:**
+
+<Steps>
+  <Step title="Accept New Connections">
+    Check for incoming connections and initialize new clients with login messages and chat history replay.
+  </Step>
+  
+  <Step title="Poll All Clients">
+    Iterate through each client using non-blocking I/O to read any pending messages.
+  </Step>
+  
+  <Step title="Broadcast Messages">
+    Send all new messages to every client (except the sender).
+  </Step>
+  
+  <Step title="Cleanup">
+    Remove disconnected clients from the active list.
+  </Step>
+</Steps>
+
+```rust
+fn run_chat(&mut self) {
+    let mut disconnected_clients = HashSet::new();
+    
+    // Poll all clients for messages
+    for i in 0..self.clients.len() {
+        let client = self.clients.get_mut(i).unwrap();
+
+        match client.poll() {
+            Err(_) => {
+                let _ = disconnected_clients.insert(i);
+            }
+            Ok(Some(msg)) => {
+                self.messages.push(msg.into());
+                let _ = client.push(&ServerMessage::Ack);
+            }
+            Ok(_) => ()
+        }
+    }
+
+    // Remove disconnected clients
+    disconnected_clients.into_iter().for_each(|i| {
+        self.clients.remove(i);
+    });
+
+    // Broadcast new messages to all clients
+    for client in &mut self.clients {
+        for i in self.last_broadcast_msg_num..self.messages.len() {
+            let msg = self.messages.get(i).unwrap();
+            if !Self::should_send_msg_to_client(msg, client.client) {
+                continue;
+            }
+            let _ = client.push(msg);
+        }
+    }
+
+    self.last_broadcast_msg_num = self.messages.len();
+}
+```
+
+<Warning>
+The sync implementation uses non-blocking sockets (`set_nonblocking(true)`) to prevent the server from stalling. This requires careful error handling to distinguish between "no data available" and actual connection failures.
+</Warning>
+
+## Message Protocol
+
+The chatroom uses a simple text-based protocol:
+
+### Server → Client Messages
+
+```rust
+pub enum OutgoingMessage {
+    Error(String),      // ERROR:<message>
+    Login(ClientId),    // LOGIN:<client_id>
+    Ack(Produce),       // ACK:<produce>
+    Trade(Produce),     // TRADE:<produce>
+}
+```
+
+### Client → Server Messages
+
+```rust
+pub enum ServerAction {
+    Buy(Produce),   // BUY:<APPLES|PEARS|TOMATOES|POTATOES|ONIONS>
+    Sell(Produce),  // SELL:<APPLES|PEARS|TOMATOES|POTATOES|ONIONS>
+}
+```
+
+**Supported Produce Types:**
+- `APPLES`
+- `PEARS`
+- `TOMATOES`
+- `POTATOES`
+- `ONIONS`
+
+## Running the Server
+
+<Tabs>
+  <Tab title="Using Cargo">
+    ```bash
+    cargo run --bin server
+    ```
+  </Tab>
+  
+  <Tab title="Using Shell Script">
+    ```bash
+    ./server.sh
+    ```
+  </Tab>
+</Tabs>
+
+The server listens on `127.0.0.1:8888` by default.
+
+## Client Usage
+
+Connect to the chatroom using `netcat` (nc):
+
+```bash
+nc localhost 8888
+```
+
+**Example Session:**
+
+```text
+LOGIN:2294
+BUY:APPLES
+ACK:Apples
+SELL:APPLES
+ACK:Apples
+TRADE:Apples
+```
+
+<Steps>
+  <Step title="Connect">
+    The server sends a `LOGIN:<id>` message with your assigned client ID.
+  </Step>
+  
+  <Step title="Submit Orders">
+    Type `BUY:<produce>` or `SELL:<produce>` commands followed by Enter.
+  </Step>
+  
+  <Step title="Receive Acknowledgments">
+    Each valid command receives an `ACK:<produce>` response.
+  </Step>
+  
+  <Step title="Get Trade Notifications">
+    When a buy and sell order match, all clients receive `TRADE:<produce>`.
+  </Step>
+</Steps>
+
+## Testing
+
+The async implementation includes comprehensive integration tests:
+
+```rust
+#[tokio::test]
+async fn test_chatroom() {
+    let addr = "127.0.0.1:8888";
+
+    // Start server in separate thread
+    let _server_thread = std::thread::spawn(|| {
+        let runtime = Runtime::new().unwrap();
+        runtime.block_on(async { Server::start_server(addr).await });
+    });
+
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    // Create test clients
+    let (c1_producer, c1_consumer) = mpsc::channel(256);
+    let (c1_chat_producer, mut c1_chat_consumer) = mpsc::channel(256);
+
+    // Spawn client threads...
+    
+    // Test message sending
+    c1_producer.send(String::from("Hi I'm C1\n")).await.unwrap();
+
+    // Verify LOGIN and ACK messages
+    let msg = c1_chat_consumer.recv().await.unwrap();
+    assert!(msg.starts_with("LOGIN:"));
+    
+    let msg = c1_chat_consumer.recv().await.unwrap();
+    assert!(msg.contains("ACK:MESSAGE\n:"));
+}
+```
+
+<Note>
+The test uses sleep-based synchronization which is not ideal for production but acceptable for this demonstration. A more robust approach would use proper synchronization primitives.
+</Note>
+
+## Design Decisions
+
+### Why Two Implementations?
+
+<AccordionGroup>
+  <Accordion title="Async Implementation (Recommended)">
+    **Pros:**
+    - Scalable to thousands of concurrent connections
+    - Clear separation of concerns with async tasks
+    - Native support for concurrent operations
+    - Better resource utilization
+    
+    **Cons:**
+    - More complex to understand for beginners
+    - Requires Tokio runtime overhead
+    - Harder to debug due to async stack traces
+  </Accordion>
+  
+  <Accordion title="Sync Implementation (Educational)">
+    **Pros:**
+    - Simpler mental model
+    - No async/await complexity
+    - Easier to debug with traditional stack traces
+    - Demonstrates low-level socket handling
+    
+    **Cons:**
+    - Limited scalability (single thread)
+    - Requires careful non-blocking I/O management
+    - More manual state management
+    - Polling introduces latency
+  </Accordion>
+</AccordionGroup>
+
+### Client ID Assignment
+
+The server assigns client IDs using a random starting point (1000-5000) followed by sequential increments:
+
+```rust
+let mut user_id = thread_rng().gen_range(1000..5000);
+
+loop {
+    let (socket, _) = listener.accept().await.unwrap();
+    let client_user_id = user_id;
+    user_id += 1;
+    // ...
+}
+```
+
+This approach was chosen because the assignment didn't specify an ID generation strategy. In production, consider:
+- UUID-based IDs for distributed systems
+- Database-backed ID generation
+- Authentication-based user identification
+
+## Key Takeaways
+
+<CardGroup cols={2}>
+  <Card title="Async Architecture" icon="gears">
+    The async implementation uses separate tasks for the Chat manager and each client connection, coordinated through Tokio channels.
+  </Card>
+  
+  <Card title="Message Broadcasting" icon="tower-broadcast">
+    The broadcast pattern efficiently delivers messages to multiple clients without N² message copying.
+  </Card>
+  
+  <Card title="Error Handling" icon="triangle-exclamation">
+    Both implementations gracefully handle client disconnections and invalid messages without crashing the server.
+  </Card>
+  
+  <Card title="Protocol Design" icon="message">
+    The simple text-based protocol makes debugging easy with standard tools like `nc` and `telnet`.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup>
+  <Card title="Order Book Example" icon="book" href="/examples/order-book">
+    Learn about implementing a high-performance order matching engine
+  </Card>
+  
+  <Card title="ParadeDB Example" icon="database" href="/examples/paradedb">
+    Explore full-text search with ParadeDB and PostgreSQL
+  </Card>
+</CardGroup>

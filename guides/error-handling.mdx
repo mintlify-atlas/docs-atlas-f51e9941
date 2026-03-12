@@ -1,0 +1,418 @@
+---
+title: 'Error Handling'
+description: 'Robust error handling patterns with Result, thiserror, and the ? operator'
+---
+
+## Overview
+
+Rust uses the `Result` type for recoverable errors and `panic!` for unrecoverable errors. This guide covers error handling patterns from our example projects.
+
+## The Result Type
+
+Functions that can fail return `Result<T, E>`:
+
+```rust
+fn create_and_init_db() -> Result<db::DbConnection, postgres::Error> {
+    let mut conn = db::DbConnection::new()?;
+    conn.init_database()?;
+    Ok(conn)
+}
+```
+
+- `Ok(value)` - Success case containing the result
+- `Err(error)` - Failure case containing the error
+
+## Error Propagation with ?
+
+The `?` operator automatically propagates errors up the call stack:
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = args();
+    let mut conn = create_and_init_db()?;  // Returns early if error
+
+    match args.command {
+        Command::Update => {
+            update_from_json(&mut conn)?;  // Propagates error
+            println!("Database Initialized!");
+        }
+        Command::Search { query } => {
+            let query = query.join(" ");
+            search_articles(&mut conn, &query)?;  // Propagates error
+        }
+    }
+
+    Ok(())
+}
+```
+
+<Note>
+The `?` operator can only be used in functions that return `Result` or `Option`. It automatically converts error types when possible.
+</Note>
+
+## Custom Error Types with thiserror
+
+The `thiserror` crate makes defining custom errors easy. From paradedb/src/main.rs:6-12:
+
+```rust
+use thiserror::Error;
+
+#[derive(Debug, thiserror::Error)]
+pub enum SearchError {
+    #[error(transparent)]
+    PostgresError(#[from] postgres::Error),
+    #[error(transparent)]
+    ErrorReadingJsonError(#[from] std::io::Error),
+}
+```
+
+### Error Attributes
+
+<Tabs>
+  <Tab title="#[error(transparent)]">
+    ```rust
+    #[derive(Debug, thiserror::Error)]
+    pub enum SearchError {
+        #[error(transparent)]
+        PostgresError(#[from] postgres::Error),
+    }
+    ```
+    
+    The `transparent` attribute forwards the error display and source to the inner error. The error message will be exactly what the inner error provides.
+  </Tab>
+  
+  <Tab title="#[error] with message">
+    ```rust
+    #[derive(Debug, thiserror::Error)]
+    pub enum SearchError {
+        #[error("Database connection failed: {0}")]
+        ConnectionError(String),
+        
+        #[error("Invalid query: {query}")]
+        InvalidQuery { query: String },
+    }
+    ```
+    
+    Custom error messages with field interpolation. Use `{0}` for tuple fields or `{field}` for struct fields.
+  </Tab>
+  
+  <Tab title="#[from]">
+    ```rust
+    #[derive(Debug, thiserror::Error)]
+    pub enum SearchError {
+        #[error(transparent)]
+        PostgresError(#[from] postgres::Error),
+        
+        #[error(transparent)]
+        IoError(#[from] std::io::Error),
+    }
+    ```
+    
+    The `from` attribute automatically generates `From` implementations, allowing `?` to convert errors automatically.
+  </Tab>
+</Tabs>
+
+## Using Custom Errors
+
+From paradedb/src/main.rs:38-46:
+
+```rust
+fn update_from_json(conn: &mut db::DbConnection) -> Result<(), SearchError> {
+    let articles = fetcher::read_articles_from_disk("data/sample_articles.json")?;
+
+    for article in articles {
+        conn.insert_article(&article)?;
+    }
+
+    Ok(())
+}
+```
+
+The `?` operator automatically converts:
+- `std::io::Error` → `SearchError::ErrorReadingJsonError`
+- `postgres::Error` → `SearchError::PostgresError`
+
+<Tip>
+With `#[from]`, you don't need to manually wrap errors - the `?` operator does it automatically!
+</Tip>
+
+## Error Handling Patterns
+
+### Match on Result
+
+```rust
+match line.parse::<Order>() {
+    Ok(order) => {
+        println!("Submitting order: {:?}", order);
+        let trades = engine.submit_order(order);
+        // Process trades...
+    }
+    Err(e) => {
+        eprintln!(
+            "Error parsing order: {}. Expected format: <price> <quantity> <buy|sell>",
+            e
+        );
+    }
+}
+```
+
+### map_err for Error Transformation
+
+From client.rs:31-45:
+
+```rust
+async fn drain_client_msg<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+) -> Result<Option<ServerAction>, io::Error> {
+    if let Some(line) = reader.lines().next_line().await? {
+        if !line.trim().is_empty() {
+            let msg = line
+                .parse::<ServerAction>()
+                .map(|e| Some(e))
+                .map_err(|e| io::Error::other(e));  // Convert to io::Error
+            return msg;
+        }
+    }
+    Ok(None)
+}
+```
+
+### Categorizing Errors
+
+From client.rs:101-109:
+
+```rust
+result = Self::drain_client_msg(&mut buf_reader) => {
+    match result {
+        Ok(Some(msg)) => {
+            // Process message
+        }
+        Ok(None) => (),  // No message, continue
+        Err(e) if e.kind() == io::ErrorKind::Other => {
+            // Write error to client
+            Self::send_message(&mut writer, OutgoingMessage::Error(e.to_string())).await?;
+        }
+        Err(e) => {
+            // Client disconnected
+            break;
+        }
+    }
+}
+```
+
+## Error Types Across Modules
+
+Different parts of your application may use different error types:
+
+<CodeGroup>
+```rust PostgreSQL Errors
+fn search_articles(
+    conn: &mut db::DbConnection, 
+    query: &str
+) -> Result<(), postgres::Error> {
+    let articles = conn.search_articles(query)?;
+    
+    for article in articles {
+        println!("**{}**", article.title());
+    }
+    
+    Ok(())
+}
+```
+
+```rust I/O Errors
+async fn drain_client_msg<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+) -> Result<Option<ServerAction>, io::Error> {
+    if let Some(line) = reader.lines().next_line().await? {
+        // Process line...
+    }
+    Ok(None)
+}
+```
+
+```rust Custom Errors
+fn update_from_json(
+    conn: &mut db::DbConnection
+) -> Result<(), SearchError> {
+    let articles = fetcher::read_articles_from_disk("data.json")?;
+    conn.insert_article(&article)?;
+    Ok(())
+}
+```
+</CodeGroup>
+
+## Box dyn Error for Flexibility
+
+Use `Box<dyn std::error::Error>` when you need to handle multiple error types:
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut conn = create_and_init_db()?;  // Returns postgres::Error
+    update_from_json(&mut conn)?;           // Returns SearchError
+    Ok(())
+}
+```
+
+<Note>
+`Box<dyn std::error::Error>` can hold any error type that implements the `Error` trait. It's convenient but loses specific type information.
+</Note>
+
+## Assertions vs Errors
+
+Use assertions for invariants that should never be violated:
+
+```rust
+fn new(price: Price, quantity: Quantity, side: Side) -> Self {
+    assert!(price > Decimal::ZERO, "Price must be positive");
+    Self {
+        id: NEXT_ORDER_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        price,
+        quantity,
+        side,
+    }
+}
+```
+
+From order_book/src/main.rs:33, this assertion ensures price is always valid. Violations indicate programmer errors, not runtime conditions.
+
+<Warning>
+Use assertions (`assert!`, `panic!`) for **programming errors** - bugs that should never happen. Use `Result` for **expected errors** - conditions that might occur during normal operation.
+</Warning>
+
+## Error Context
+
+### Adding Context to Errors
+
+```rust
+impl FromStr for Order {
+    type Err = String;
+    
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts = s.splitn(3, ' ').collect::<Vec<_>>();
+        if parts.len() != 3 {
+            return Err(format!(
+                "Invalid format. Expected <price> <quantity> <side>. Got: {}",
+                s
+            ));
+        }
+        
+        let price = parts[0]
+            .parse::<Price>()
+            .map_err(|_| "Invalid price".to_string())?;
+        let quantity = parts[1]
+            .parse::<Quantity>()
+            .map_err(|_| "Invalid quantity".to_string())?;
+        let side = parts[2]
+            .parse::<Side>()
+            .map_err(|_| "Invalid side".to_string())?;
+            
+        Ok(Self::new(price, quantity, side))
+    }
+}
+```
+
+This provides clear error messages at each parsing step.
+
+## Expect for Unrecoverable Errors
+
+Use `.expect()` when an error truly shouldn't happen:
+
+```rust
+let listener = TcpListener::bind(addr)
+    .await
+    .expect("Couldn't establish connection to socket");
+
+println!(
+    "listening on port {}",
+    listener.local_addr().unwrap().port()
+);
+```
+
+<Tip>
+`expect()` is like `unwrap()` but lets you provide a custom panic message. Use it when failure indicates a fundamental problem that can't be recovered from.
+</Tip>
+
+## Best Practices
+
+1. **Use Result for Recoverable Errors**: File not found, network timeout, invalid input
+2. **Use panic! for Programming Errors**: Array out of bounds, null pointer, broken invariants
+3. **Provide Context**: Error messages should help diagnose the problem
+4. **Don't Ignore Errors**: Use `?` or explicitly handle with `match`
+5. **Choose the Right Error Type**:
+   - `Result<T, SpecificError>` for library code
+   - `Result<T, Box<dyn Error>>` for application code
+   - Custom enums with `thiserror` for complex error handling
+
+## Common Patterns
+
+### Early Return Pattern
+
+```rust
+fn process_data(input: &str) -> Result<ProcessedData, AppError> {
+    if input.is_empty() {
+        return Err(AppError::EmptyInput);
+    }
+    
+    let parsed = parse(input)?;
+    let validated = validate(parsed)?;
+    let processed = transform(validated)?;
+    
+    Ok(processed)
+}
+```
+
+### Option to Result Conversion
+
+```rust
+let value = option_value
+    .ok_or_else(|| AppError::NotFound)?;
+```
+
+### Result to Option Conversion
+
+```rust
+let maybe_value = result_value.ok();  // Discards error
+```
+
+## Error Logging
+
+From paradedb/src/main.rs:217-220:
+
+```rust
+Err(e) => {
+    eprintln!(
+        "Error parsing order: {}. Expected format: <price> <quantity> <buy|sell>",
+        e
+    );
+}
+```
+
+Use `eprintln!` for error output (stderr) vs `println!` for normal output (stdout).
+
+## Testing Error Cases
+
+```rust
+#[test]
+fn test_invalid_order_format() {
+    let result = "invalid".parse::<Order>();
+    assert!(result.is_err());
+    
+    if let Err(msg) = result {
+        assert!(msg.contains("Invalid format"));
+    }
+}
+
+#[test]
+#[should_panic(expected = "Price must be positive")]
+fn test_zero_price_panics() {
+    Order::new(Decimal::ZERO, 100, Side::Buy);
+}
+```
+
+## Further Reading
+
+- [The Rust Book - Error Handling](https://doc.rust-lang.org/book/ch09-00-error-handling.html)
+- [thiserror crate](https://docs.rs/thiserror/)
+- [anyhow crate](https://docs.rs/anyhow/) - Alternative for application-level errors
+- Source: `paradedb/src/main.rs` and `order_book/src/main.rs`
